@@ -1,0 +1,11 @@
+{
+    "name": "jerome/franken-ext",
+    "description": "FrankenPHP ClickHouse extension",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "smi2/phpclickhouse": "^1.6",
+        "vlucas/phpdotenv": "^5.6",
+        "ramsey/uuid": "^4.9"
+    }
+}

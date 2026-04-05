@@ -1,0 +1,29 @@
+services:
+  frankenphp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: frankenphp
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./web:/app
+    depends_on:
+      - clickhouse
+
+  # ClickHouse Database
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.5
+    ports:
+      - "8123:8123" # HTTP port
+      - "9000:9000" # Native port
+    environment:
+      - CLICKHOUSE_DB=events_db
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=strongpassword
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./docker/clickhouse/migrations:/docker-entrypoint-initdb.d
+
+volumes:
+  clickhouse_data:

@@ -1,0 +1,15 @@
+{
+	frankenphp {
+		worker {
+			file worker.php
+			num 1
+		}
+	}
+	admin off
+}
+
+:8080 {
+	root * .
+	rewrite * /worker.php
+	php_server
+}
