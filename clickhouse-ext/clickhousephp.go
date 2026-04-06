@@ -24,17 +24,50 @@ func init() {
 	frankenphp.RegisterExtension(unsafe.Pointer(&C.clickhousephp_module_entry))
 }
 
+const poolSize = 4
+
 var (
-	clickhouseClient clickhouse.Conn
-	clientMu         sync.RWMutex
-	lastError        string
-	lastErrorMu      sync.Mutex
+	connPool    chan clickhouse.Conn
+	connDSN     string
+	poolMu      sync.Mutex
+	lastError   string
+	lastErrorMu sync.Mutex
 )
 
-func getClient() clickhouse.Conn {
-	clientMu.RLock()
-	defer clientMu.RUnlock()
-	return clickhouseClient
+// acquireConn gets a connection from the pool, creating one on demand if needed.
+func acquireConn() (clickhouse.Conn, error) {
+	poolMu.Lock()
+	pool := connPool
+	dsn := connDSN
+	poolMu.Unlock()
+
+	if pool == nil {
+		return nil, fmt.Errorf("Client not connected")
+	}
+
+	select {
+	case c := <-pool:
+		return c, nil
+	default:
+		return connectClickHouse(dsn)
+	}
+}
+
+// releaseConn returns a connection to the pool, closing it if the pool is full.
+func releaseConn(c clickhouse.Conn) {
+	poolMu.Lock()
+	pool := connPool
+	poolMu.Unlock()
+
+	if pool == nil {
+		c.Close()
+		return
+	}
+	select {
+	case pool <- c:
+	default:
+		c.Close()
+	}
 }
 
 func setLastError(msg string) {
@@ -62,30 +95,53 @@ func clickhouse_connect(dsn *C.zend_string) unsafe.Pointer {
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
-	clientMu.Lock()
-	clickhouseClient = client
-	clientMu.Unlock()
+
+	poolMu.Lock()
+	// Close previous pool if reconnecting
+	if connPool != nil {
+		old := connPool
+		connPool = nil
+		poolMu.Unlock()
+		close(old)
+		for c := range old {
+			c.Close()
+		}
+		poolMu.Lock()
+	}
+	connPool = make(chan clickhouse.Conn, poolSize)
+	connPool <- client
+	connDSN = dsnURL
+	poolMu.Unlock()
+
 	return frankenphp.PHPString("Ok", false)
 }
 
 //export clickhouse_disconnect
 func clickhouse_disconnect() unsafe.Pointer {
-	clientMu.Lock()
-	defer clientMu.Unlock()
-	if clickhouseClient == nil {
+	poolMu.Lock()
+	if connPool == nil {
+		poolMu.Unlock()
 		return frankenphp.PHPString("ERROR: Client not connected", false)
 	}
-	clickhouseClient.Close()
-	clickhouseClient = nil
+	pool := connPool
+	connPool = nil
+	connDSN = ""
+	poolMu.Unlock()
+
+	close(pool)
+	for c := range pool {
+		c.Close()
+	}
 	return frankenphp.PHPString("Ok", false)
 }
 
 //export clickhouse_insert
 func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval) unsafe.Pointer {
-	client := getClient()
-	if client == nil {
-		return frankenphp.PHPString("ERROR: Client not connected", false)
+	client, err := acquireConn()
+	if err != nil {
+		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
+	defer releaseConn(client)
 	tableName := frankenphp.GoString(unsafe.Pointer(table))
 
 	colAny, err := frankenphp.GoValue[any](unsafe.Pointer(columns))
@@ -133,12 +189,13 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval) un
 
 //export clickhouse_exec
 func clickhouse_exec(query *C.zend_string) unsafe.Pointer {
-	client := getClient()
-	if client == nil {
-		return frankenphp.PHPString("ERROR: Client not connected", false)
+	client, err := acquireConn()
+	if err != nil {
+		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
+	defer releaseConn(client)
 	queryStr := frankenphp.GoString(unsafe.Pointer(query))
-	err := client.Exec(context.Background(), queryStr)
+	err = client.Exec(context.Background(), queryStr)
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
@@ -147,18 +204,22 @@ func clickhouse_exec(query *C.zend_string) unsafe.Pointer {
 
 //export clickhouse_query_array
 func clickhouse_query_array(query *C.zend_string) unsafe.Pointer {
-	client := getClient()
-	if client == nil {
-		setLastError("Client not connected")
-		return nil
-	}
-	queryStr := frankenphp.GoString(unsafe.Pointer(query))
-	rows, err := client.Query(context.Background(), queryStr)
+	client, err := acquireConn()
 	if err != nil {
 		setLastError(err.Error())
 		return nil
 	}
-	defer rows.Close()
+	queryStr := frankenphp.GoString(unsafe.Pointer(query))
+	rows, qerr := client.Query(context.Background(), queryStr)
+	if qerr != nil {
+		releaseConn(client)
+		setLastError(qerr.Error())
+		return nil
+	}
+	defer func() {
+		rows.Close()
+		releaseConn(client)
+	}()
 
 	cols := rows.Columns()
 	colTypes := rows.ColumnTypes()
