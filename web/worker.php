@@ -21,10 +21,10 @@ for ($i = 1; $i <= $maxRetries; $i++) {
     try {
         clickhouse_connect($dsn);
         $connected = true;
-        fwrite(STDERR, "[worker] ClickHouse connected\n");
+        error_log("[worker] ClickHouse connected");
         break;
     } catch (RuntimeException $e) {
-        fwrite(STDERR, "[worker] ClickHouse connection attempt $i/$maxRetries failed: " . $e->getMessage() . "\n");
+        error_log("[worker] ClickHouse connection attempt $i/$maxRetries failed: " . $e->getMessage() . "");
         if ($i < $maxRetries) {
             sleep($retryDelay);
         }
@@ -32,7 +32,7 @@ for ($i = 1; $i <= $maxRetries; $i++) {
 }
 
 if (!$connected) {
-    fwrite(STDERR, "[worker] WARNING: running without ClickHouse connection\n");
+    error_log("[worker] WARNING: running without ClickHouse connection");
 }
 
 // ============================================================
