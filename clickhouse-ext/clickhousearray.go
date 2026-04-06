@@ -63,8 +63,12 @@ static void ch_add_row(
 */
 import "C"
 import (
+	"net/netip"
 	"time"
 	"unsafe"
+
+	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 )
 
 // ── Generic query array ───────────────────────────────────────────────────────
@@ -214,6 +218,34 @@ func packCol(
 				return
 			}
 			dest = *pp
+		case kindBool:
+			pp := dest.(*(*bool))
+			if *pp == nil {
+				types[i] = chNull
+				return
+			}
+			dest = *pp
+		case kindUUID:
+			pp := dest.(*(*uuid.UUID))
+			if *pp == nil {
+				types[i] = chNull
+				return
+			}
+			dest = *pp
+		case kindIPv4, kindIPv6:
+			pp := dest.(*(*netip.Addr))
+			if *pp == nil {
+				types[i] = chNull
+				return
+			}
+			dest = *pp
+		case kindDecimal:
+			pp := dest.(*(*decimal.Decimal))
+			if *pp == nil {
+				types[i] = chNull
+				return
+			}
+			dest = *pp
 		}
 	}
 
@@ -245,6 +277,25 @@ func packCol(
 		uvals[i], types[i] = C.uint64_t(*(dest.(*uint32))), chUInt
 	case kindUInt64:
 		uvals[i], types[i] = C.uint64_t(*(dest.(*uint64))), chUInt
+	case kindBool:
+		v := *(dest.(*bool))
+		if v {
+			uvals[i], types[i] = 1, chUInt
+		} else {
+			uvals[i], types[i] = 0, chUInt
+		}
+	case kindUUID:
+		s := (*(dest.(*uuid.UUID))).String()
+		*sbuf = append(*sbuf, s...)
+		soff[i], slen[i], types[i] = off, C.uint32_t(len(s)), chStr
+	case kindIPv4, kindIPv6:
+		s := (*(dest.(*netip.Addr))).String()
+		*sbuf = append(*sbuf, s...)
+		soff[i], slen[i], types[i] = off, C.uint32_t(len(s)), chStr
+	case kindDecimal:
+		s := (*(dest.(*decimal.Decimal))).String()
+		*sbuf = append(*sbuf, s...)
+		soff[i], slen[i], types[i] = off, C.uint32_t(len(s)), chStr
 	}
 }
 

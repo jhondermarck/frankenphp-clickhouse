@@ -1,4 +1,4 @@
-.PHONY: all build build_local ext bench bench_local serve bench_worker test test_go up down restart clean
+.PHONY: all build ext bench bench_worker_docker bench_docker up down restart test test_go frankenphp
 
 all: build
 
@@ -10,9 +10,12 @@ up:
 down:
 	docker-compose down
 
+bench_docker:
+	docker-compose exec frankenphp frankenphp php-cli /app/bench.php
+
 restart:
 	docker-compose down
-	docker-compose up -d
+	docker-compose up -d --build
 
 # ── Local dev (macOS, xcaddy) ─────────────────────────────────────────────────
 
@@ -33,25 +36,33 @@ build:
 	xcaddy build \
 	  --output frankenphp-clickhouse \
 	  --with github.com/dunglas/frankenphp/caddy \
-	  --with github.com/jhondermarck/frankenphp-clickhouse/clickhouse-ext/build=./clickhouse-ext/build
+	  --with github.com/jhondermarck/frankenphp-clickhouse/clickhouse-ext=./clickhouse-ext
 
-ext:
+frankenphp:
+	@if [ ! -f frankenphp ]; then \
+	  ARCH=$$(uname -m); \
+	  case "$$ARCH" in \
+	    arm64)  FILE=frankenphp-mac-arm64 ;; \
+	    x86_64) FILE=frankenphp-mac-x86_64 ;; \
+	    *)      echo "Unsupported arch: $$ARCH" && exit 1 ;; \
+	  esac; \
+	  echo "Downloading $$FILE…"; \
+	  curl -fsSL "https://github.com/dunglas/frankenphp/releases/latest/download/$$FILE" -o frankenphp; \
+	  chmod +x frankenphp; \
+	  echo "Downloaded frankenphp"; \
+	fi
+
+ext: frankenphp
 	cd clickhouse-ext \
-	  && rm -rf build \
 	  && ../frankenphp extension-init clickhousephp.go \
-	  && cp clickhousetypes.go build/ \
-	  && cp clickhousearray.go build/ \
-	  && cp clickhousetypes_test.go build/ \
-	  && cd build && go mod init github.com/jhondermarck/frankenphp-clickhouse/clickhouse-ext/build && go mod tidy
+	  && rm -f clickhousephp_generated.go \
+	  && sed -i '' 's/go_clickhouse_/clickhouse_/g' clickhousephp.c
 
 bench:
 	./frankenphp-clickhouse php-cli web/bench.php
 
-serve:
-	./frankenphp-clickhouse run --config web/Caddyfile
-
 bench_worker:
-	./frankenphp-clickhouse php-cli web/bench_http.php
+	docker-compose exec frankenphp php /app/bench_http.php
 
 test:
 	./frankenphp-clickhouse php-cli web/test.php
@@ -69,4 +80,4 @@ test_go:
 	              $$(php-config --ldflags) \
 	              $$(php-config --libs) \
 	              -L/opt/homebrew/lib -lbrotlienc -lbrotlicommon -lbrotlidec -lwatcher-c" \
-	go test -C clickhouse-ext/build -v -count=1 .
+	go test -C clickhouse-ext -v -count=1 .

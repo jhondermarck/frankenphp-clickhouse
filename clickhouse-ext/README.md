@@ -24,20 +24,6 @@ clickhouse_disconnect(): string
 
 **Returns:** string
 
-### clickhouse_insert
-
-```php
-clickhouse_insert(string $table,array $values,array $columns): string
-```
-
-**Parameters:**
-
-- `table` (string)
-- `values` (array)
-- `columns` (array)
-
-**Returns:** string
-
 ### clickhouse_exec
 
 ```php

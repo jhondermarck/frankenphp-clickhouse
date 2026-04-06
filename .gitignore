@@ -1,15 +1,5 @@
 vendor
-/build
-
-frankenphp
-frankenphp-clickhouse
+/frankenphp
+/frankenphp-clickhouse
 .env
 .idea
-# Legacy root files (moved to clickhouse-ext/ and web/)
-/Caddyfile
-/bench_http.php
-/clickhousearray.go
-/clickhousetypes.go
-/clickhousetypes_test.go
-/test.php
-/worker.php

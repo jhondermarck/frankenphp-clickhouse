@@ -2,8 +2,12 @@ package clickhousephp
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 )
 
 type colKind int
@@ -21,6 +25,11 @@ const (
 	kindUInt16
 	kindUInt32
 	kindUInt64
+	kindBool
+	kindUUID
+	kindIPv4
+	kindIPv6
+	kindDecimal
 )
 
 type colMeta struct {
@@ -41,11 +50,17 @@ func parseColMeta(dbType string) (colMeta, error) {
 	if strings.HasPrefix(raw, "DateTime64") {
 		raw = "DateTime"
 	}
+	if strings.HasPrefix(raw, "Enum8") || strings.HasPrefix(raw, "Enum16") {
+		raw = "String" // driver returns enum name as string
+	}
+	if strings.HasPrefix(raw, "Decimal") {
+		raw = "Decimal"
+	}
 	var k colKind
 	switch raw {
 	case "String", "FixedString":
 		k = kindString
-	case "DateTime":
+	case "DateTime", "Date", "Date32":
 		k = kindDateTime
 	case "Float32":
 		k = kindFloat32
@@ -67,6 +82,16 @@ func parseColMeta(dbType string) (colMeta, error) {
 		k = kindUInt32
 	case "UInt64":
 		k = kindUInt64
+	case "Bool":
+		k = kindBool
+	case "UUID":
+		k = kindUUID
+	case "IPv4":
+		k = kindIPv4
+	case "IPv6":
+		k = kindIPv6
+	case "Decimal":
+		k = kindDecimal
 	default:
 		return colMeta{}, fmt.Errorf("unsupported type: %s", dbType)
 	}
@@ -100,6 +125,14 @@ func allocScanDest(m colMeta) interface{} {
 			return new(*uint32)
 		case kindUInt64:
 			return new(*uint64)
+		case kindBool:
+			return new(*bool)
+		case kindUUID:
+			return new(*uuid.UUID)
+		case kindIPv4, kindIPv6:
+			return new(*netip.Addr)
+		case kindDecimal:
+			return new(*decimal.Decimal)
 		}
 	}
 	switch m.kind {
@@ -127,8 +160,56 @@ func allocScanDest(m colMeta) interface{} {
 		return new(uint32)
 	case kindUInt64:
 		return new(uint64)
+	case kindBool:
+		return new(bool)
+	case kindUUID:
+		return new(uuid.UUID)
+	case kindIPv4, kindIPv6:
+		return new(netip.Addr)
+	case kindDecimal:
+		return new(decimal.Decimal)
 	}
 	return new(string)
+}
+
+// resetNullableDest sets the inner pointer of a nullable scan destination to nil.
+// This is needed because some drivers (e.g. clickhouse-go for UUID) don't reset
+// the pointer when scanning NULL after a non-NULL row.
+func resetNullableDest(k colKind, dest interface{}) {
+	switch k {
+	case kindString:
+		*(dest.(*(*string))) = nil
+	case kindDateTime:
+		*(dest.(*(*time.Time))) = nil
+	case kindFloat32:
+		*(dest.(*(*float32))) = nil
+	case kindFloat64:
+		*(dest.(*(*float64))) = nil
+	case kindInt8:
+		*(dest.(*(*int8))) = nil
+	case kindInt16:
+		*(dest.(*(*int16))) = nil
+	case kindInt32:
+		*(dest.(*(*int32))) = nil
+	case kindInt64:
+		*(dest.(*(*int64))) = nil
+	case kindUInt8:
+		*(dest.(*(*uint8))) = nil
+	case kindUInt16:
+		*(dest.(*(*uint16))) = nil
+	case kindUInt32:
+		*(dest.(*(*uint32))) = nil
+	case kindUInt64:
+		*(dest.(*(*uint64))) = nil
+	case kindBool:
+		*(dest.(*(*bool))) = nil
+	case kindUUID:
+		*(dest.(*(*uuid.UUID))) = nil
+	case kindIPv4, kindIPv6:
+		*(dest.(*(*netip.Addr))) = nil
+	case kindDecimal:
+		*(dest.(*(*decimal.Decimal))) = nil
+	}
 }
 
 // appendTimeRaw appends t in RFC3339Nano format (without quotes) to b.

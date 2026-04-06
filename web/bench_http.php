@@ -4,7 +4,7 @@
 // Nécessite que "make serve" tourne dans un autre terminal
 // ============================================================
 
-$base       = 'http://localhost:8080';
+$base       = $_ENV['BENCH_URL'] ?? getenv('BENCH_URL') ?: 'http://localhost:8080';
 $iterations = 20;
 $warmup     = 3;
 

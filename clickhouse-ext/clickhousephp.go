@@ -1,16 +1,18 @@
 package clickhousephp
 
 /*
-#include <php.h>
+#include <stdlib.h>
+#include "clickhousephp.h"
 */
-
+import "C"
 import (
-	"C"
+	_ "runtime/cgo"
 	"context"
 	"crypto/tls"
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -18,21 +20,58 @@ import (
 	"github.com/dunglas/frankenphp"
 )
 
-var clickhouseClient clickhouse.Conn
+func init() {
+	frankenphp.RegisterExtension(unsafe.Pointer(&C.clickhousephp_module_entry))
+}
 
-// export_php:function clickhouse_connect(string $dsn): string
+var (
+	clickhouseClient clickhouse.Conn
+	clientMu         sync.RWMutex
+	lastError        string
+	lastErrorMu      sync.Mutex
+)
+
+func getClient() clickhouse.Conn {
+	clientMu.RLock()
+	defer clientMu.RUnlock()
+	return clickhouseClient
+}
+
+func setLastError(msg string) {
+	lastErrorMu.Lock()
+	lastError = msg
+	lastErrorMu.Unlock()
+}
+
+//export clickhouse_get_last_error
+func clickhouse_get_last_error() unsafe.Pointer {
+	lastErrorMu.Lock()
+	err := lastError
+	lastError = ""
+	lastErrorMu.Unlock()
+	if err == "" {
+		return nil
+	}
+	return frankenphp.PHPString(err, false)
+}
+
+//export clickhouse_connect
 func clickhouse_connect(dsn *C.zend_string) unsafe.Pointer {
 	dsnURL := frankenphp.GoString(unsafe.Pointer(dsn))
 	client, err := connectClickHouse(dsnURL)
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
+	clientMu.Lock()
 	clickhouseClient = client
+	clientMu.Unlock()
 	return frankenphp.PHPString("Ok", false)
 }
 
-// export_php:function clickhouse_disconnect(): string
+//export clickhouse_disconnect
 func clickhouse_disconnect() unsafe.Pointer {
+	clientMu.Lock()
+	defer clientMu.Unlock()
 	if clickhouseClient == nil {
 		return frankenphp.PHPString("ERROR: Client not connected", false)
 	}
@@ -41,10 +80,12 @@ func clickhouse_disconnect() unsafe.Pointer {
 	return frankenphp.PHPString("Ok", false)
 }
 
-// export_php:function clickhouse_insert(string $table,array $values,array $columns): string
-// $values is a flat array of values; columns determines the row stride.
-// e.g. columns=['a','b'], values=[1,'x',2,'y'] → 2 rows: (1,'x'), (2,'y')
+//export clickhouse_insert
 func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval) unsafe.Pointer {
+	client := getClient()
+	if client == nil {
+		return frankenphp.PHPString("ERROR: Client not connected", false)
+	}
 	tableName := frankenphp.GoString(unsafe.Pointer(table))
 
 	colAny, err := frankenphp.GoValue[any](unsafe.Pointer(columns))
@@ -73,7 +114,7 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval) un
 	}
 
 	ctx := context.Background()
-	batch, err := clickhouseClient.PrepareBatch(ctx, "INSERT INTO "+tableName)
+	batch, err := client.PrepareBatch(ctx, "INSERT INTO "+tableName)
 	if err != nil {
 		return frankenphp.PHPString("Send error: "+err.Error(), false)
 	}
@@ -90,25 +131,32 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval) un
 	return frankenphp.PHPString("Ok", false)
 }
 
-// export_php:function clickhouse_exec(string $query): string
+//export clickhouse_exec
 func clickhouse_exec(query *C.zend_string) unsafe.Pointer {
-	if clickhouseClient == nil {
+	client := getClient()
+	if client == nil {
 		return frankenphp.PHPString("ERROR: Client not connected", false)
 	}
 	queryStr := frankenphp.GoString(unsafe.Pointer(query))
-	err := clickhouseClient.Exec(context.Background(), queryStr)
+	err := client.Exec(context.Background(), queryStr)
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
 	return frankenphp.PHPString("Ok", false)
 }
 
-// export_php:function clickhouse_query_array(string $query): array
+//export clickhouse_query_array
 func clickhouse_query_array(query *C.zend_string) unsafe.Pointer {
+	client := getClient()
+	if client == nil {
+		setLastError("Client not connected")
+		return nil
+	}
 	queryStr := frankenphp.GoString(unsafe.Pointer(query))
-	rows, err := clickhouseClient.Query(context.Background(), queryStr)
+	rows, err := client.Query(context.Background(), queryStr)
 	if err != nil {
-		return newResultArray(0)
+		setLastError(err.Error())
+		return nil
 	}
 	defer rows.Close()
 
@@ -119,7 +167,6 @@ func clickhouse_query_array(query *C.zend_string) unsafe.Pointer {
 		return newResultArray(0)
 	}
 
-	// One-time setup outside the hot loop
 	metas := make([]colMeta, n)
 	dests := make([]interface{}, n)
 	for i, ct := range colTypes {
@@ -135,7 +182,6 @@ func clickhouse_query_array(query *C.zend_string) unsafe.Pointer {
 		keys[i] = internKey(col)
 	}
 
-	// Per-row working buffers — allocated once, reused every row
 	types := make([]C.uint8_t, n)
 	soff  := make([]C.uint32_t, n)
 	slen  := make([]C.uint32_t, n)
@@ -147,6 +193,12 @@ func clickhouse_query_array(query *C.zend_string) unsafe.Pointer {
 	result := newResultArray(160000)
 
 	for rows.Next() {
+		// Reset nullable pointers so the driver can set them to nil for NULL
+		for i, m := range metas {
+			if m.nullable {
+				resetNullableDest(m.kind, dests[i])
+			}
+		}
 		if err := rows.Scan(dests...); err != nil {
 			return result
 		}
@@ -191,8 +243,6 @@ func connectClickHouse(dsn string) (clickhouse.Conn, error) {
 		tlsConfig = &tls.Config{InsecureSkipVerify: skip}
 	}
 
-	// LZ4 compression on the native TCP protocol reduces network I/O significantly
-	// on non-localhost deployments. Disable via ?compress=false in the DSN.
 	compression := &clickhouse.Compression{Method: clickhouse.CompressionLZ4}
 	if parsed.Query().Get("compress") == "false" {
 		compression = nil

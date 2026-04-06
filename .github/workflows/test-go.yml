@@ -1,0 +1,27 @@
+name: Go Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Go unit tests
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/work" \
+            -w /work \
+            dunglas/frankenphp:builder \
+            sh -c '
+              CGO_ENABLED=1 \
+              CGO_CFLAGS="$(php-config --includes) -D_GNU_SOURCE" \
+              CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" \
+              go test -C clickhouse-ext -v -count=1 .
+            '

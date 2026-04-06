@@ -12,8 +12,28 @@ if (class_exists('Dotenv\\Dotenv')) {
 $dsn   = $_ENV['CH_DSN']   ?? 'clickhouse://default@localhost:9000/default?secure=false';
 $query = $_ENV['CH_QUERY'] ?? '';
 
-// Connexion unique — persiste pour toute la vie du worker
-clickhouse_connect($dsn);
+// Connexion avec retry — ClickHouse peut ne pas être prêt au boot
+$maxRetries = 5;
+$retryDelay = 2;
+$connected  = false;
+
+for ($i = 1; $i <= $maxRetries; $i++) {
+    try {
+        clickhouse_connect($dsn);
+        $connected = true;
+        fwrite(STDERR, "[worker] ClickHouse connected\n");
+        break;
+    } catch (RuntimeException $e) {
+        fwrite(STDERR, "[worker] ClickHouse connection attempt $i/$maxRetries failed: " . $e->getMessage() . "\n");
+        if ($i < $maxRetries) {
+            sleep($retryDelay);
+        }
+    }
+}
+
+if (!$connected) {
+    fwrite(STDERR, "[worker] WARNING: running without ClickHouse connection\n");
+}
 
 // ============================================================
 // Boucle de traitement des requêtes HTTP

@@ -1,0 +1,40 @@
+name: Build
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build frankenphp-clickhouse
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/work" \
+            -w /work \
+            dunglas/frankenphp:builder \
+            sh -c '
+              export PATH="/usr/local/go/bin:$(go env GOPATH)/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && \
+              CGO_ENABLED=0 go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest && \
+              CGO_ENABLED=1 \
+              XCADDY_GO_BUILD_FLAGS="-tags=nobadger,nomysql,nopgx" \
+              CGO_CFLAGS="$(php-config --includes) -D_GNU_SOURCE" \
+              CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" \
+              xcaddy build \
+                --output /work/frankenphp-clickhouse \
+                --with github.com/dunglas/frankenphp/caddy \
+                --with github.com/jhondermarck/frankenphp-clickhouse/clickhouse-ext=/work/clickhouse-ext
+            '
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: frankenphp-clickhouse-linux-amd64
+          path: frankenphp-clickhouse
+          retention-days: 7

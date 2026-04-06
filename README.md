@@ -74,21 +74,33 @@ Parameters: 3 warmup + 20 iterations.
 ## PHP API
 
 ```php
-// Connect once at startup (in worker mode: at process boot)
-clickhouse_connect(string $dsn): string         // "Ok" | "ERROR: ..."
-
-// Query → associative PHP array, any schema
-clickhouse_query_array(string $query): array    // [['col' => val, ...], ...]
-
-// DDL / DML with no result set
-clickhouse_exec(string $query): string          // "Ok" | "ERROR: ..."
-
-// Batch INSERT — flat array [$v1, $v2, ..., $vN] (all columns concatenated)
-clickhouse_insert(string $table, array $values, array $columns): string
-
-// Disconnect
-clickhouse_disconnect(): string
+clickhouse_connect(string $dsn): string         // "Ok" or throws RuntimeException
+clickhouse_query_array(string $query): array    // [['col' => val, ...], ...] or throws
+clickhouse_exec(string $query): string          // "Ok" or throws RuntimeException
+clickhouse_insert(string $table, array $values, array $columns): string  // "Ok" or throws
+clickhouse_disconnect(): string                 // "Ok" or throws RuntimeException
 ```
+
+All functions throw `RuntimeException` on error. The exception message contains the ClickHouse error detail.
+
+### Error handling
+
+```php
+try {
+    clickhouse_connect('clickhouse://default@localhost:9000/mydb');
+    $rows = clickhouse_query_array('SELECT * FROM events LIMIT 50000');
+} catch (RuntimeException $e) {
+    echo "ClickHouse error: " . $e->getMessage();
+    // e.g. "ping failed: dial tcp localhost:9000: connection refused"
+    // e.g. "code: 60, message: Table default.events doesn't exist"
+}
+```
+
+Errors that throw:
+- Connection failure (bad DSN, unreachable host, authentication)
+- SQL syntax error or unknown table
+- Insert with mismatched values/columns count
+- Any operation when not connected (`clickhouse_disconnect()` called twice, query before connect)
 
 ### Example
 
@@ -112,6 +124,27 @@ clickhouse_insert('staging', $values, ['id', 'start', 'end', 'machine_id', 'type
 clickhouse_disconnect();
 ```
 
+## Supported ClickHouse Types
+
+| ClickHouse Type | PHP Type | Notes |
+|----------------|----------|-------|
+| `String`, `FixedString` | `string` | |
+| `DateTime`, `DateTime64` | `string` | Formatted as RFC3339Nano |
+| `Date`, `Date32` | `string` | Formatted as RFC3339 |
+| `Int8`, `Int16`, `Int32`, `Int64` | `int` | |
+| `UInt8`, `UInt16`, `UInt32` | `int` | |
+| `UInt64` | `int` or `float` | `float` if > PHP_INT_MAX |
+| `Float32`, `Float64` | `float` | |
+| `Bool` | `int` | `1` = true, `0` = false |
+| `UUID` | `string` | `"550e8400-e29b-..."` |
+| `IPv4`, `IPv6` | `string` | `"192.168.1.1"`, `"::1"` |
+| `Decimal(P,S)` | `string` | Preserves precision |
+| `Enum8`, `Enum16` | `string` | Enum name (e.g. `"active"`) |
+| `Nullable(T)` | `T` or `null` | Any supported type |
+| `LowCardinality(T)` | same as `T` | Transparent wrapper |
+
+Types not listed above (Array, Map, Tuple) are not yet supported and will throw a `RuntimeException`.
+
 ## DSN Format
 
 ```
@@ -126,11 +159,15 @@ clickhouse://[user[:password]@]host:port/database[?param=value]
 
 ## Worker Mode (FrankenPHP)
 
-In worker mode, the ClickHouse connection is established **once** at process boot and reused for all HTTP requests — eliminating TCP + handshake cost per call.
+In worker mode, the ClickHouse connection is established **once** at process boot and reused for all HTTP requests — eliminating TCP + handshake cost per call. Connection is retried up to 5 times on startup.
 
 ```php
 // web/worker.php
-clickhouse_connect($dsn);  // once at boot
+try {
+    clickhouse_connect($dsn);
+} catch (RuntimeException $e) {
+    fwrite(STDERR, "ClickHouse: " . $e->getMessage() . "\n");
+}
 
 while (frankenphp_handle_request(function () use ($query): void {
     $rows = clickhouse_query_array($query);
@@ -142,32 +179,40 @@ while (frankenphp_handle_request(function () use ($query): void {
 clickhouse_disconnect();
 ```
 
+## Testing
+
+```bash
+make test      # 89 PHP integration tests
+make test_go   # Go unit tests
+```
+
+The test suite covers:
+- **SELECT**: query_array returns correct PHP arrays with all column types
+- **INSERT**: batch insert with value verification
+- **19 types**: String, DateTime, Int8-64, UInt8-64, Float32/64, Bool, UUID, IPv4/IPv6, Decimal, Enum
+- **Nullable**: NULL values for all supported types
+- **Exceptions**: RuntimeException on bad query, bad DSN, not connected, double disconnect
+- **Memory leaks**: 200 iterations of query/insert/exec with 0 bytes growth
+
 ## Build
 
 ### Docker (recommended)
 
 ```bash
-make up     # docker-compose up -d
-make bench  # run benchmark inside the container
+make up       # docker-compose up -d
+make restart  # rebuild + restart
 ```
 
-The Docker image imports the extension directly from GitHub — no local compilation needed.
+The Docker image builds the extension from the committed Go module in `clickhouse-ext/`.
 
 ### Local dev (macOS, xcaddy)
 
-Requirements: [xcaddy](https://github.com/caddyserver/xcaddy), Go ≥ 1.21, PHP ≥ 8.2 with dev headers.
+Requirements: [xcaddy](https://github.com/caddyserver/xcaddy), Go >= 1.21, PHP >= 8.2 with dev headers.
 
 ```bash
-make ext     # Regenerate extension build/ (after modifying Go sources)
-make build   # Compile FrankenPHP binary with the extension
-
-make test    # PHP integration tests (30 assertions)
-make test_go # Go unit tests
-
-make bench   # INSERT + SELECT benchmark vs SMI2
-
-make serve        # Start HTTP server in worker mode
-make bench_worker # HTTP worker benchmark (separate terminal)
+make ext       # Regenerate C bridge files (downloads frankenphp if needed)
+make build     # Compile FrankenPHP binary with the extension
+make bench     # INSERT + SELECT benchmark vs SMI2
 ```
 
 ### Configuration (.env)
@@ -188,17 +233,21 @@ CH_SELECT_LIMIT=200000
 
 ```
 clickhouse-ext/
-  clickhousephp.go        # PHP-exported functions (export_php:function ...)
+  clickhousephp.go        # PHP-exported functions (//export) + FrankenPHP registration
+  clickhousephp.c         # C bridge (PHP_FUNCTION → Go, throws RuntimeException on error)
+  clickhousephp.h         # C header
+  clickhousephp_arginfo.h # PHP argument info
   clickhousearray.go      # C PHP array construction + CGo helpers
-  clickhousetypes.go      # ClickHouse type system + DateTime formatting
+  clickhousetypes.go      # ClickHouse type system (19 types) + DateTime formatting
   clickhousetypes_test.go # Go unit tests
-  build/                  # Generated module (committed — imported by Docker)
+  go.mod                  # Go module (imported by Docker)
 web/
+  test.php                # PHP integration tests (89 assertions)
   bench.php               # INSERT + SELECT benchmark vs SMI2
   bench_http.php          # HTTP worker mode benchmark
-  test.php                # PHP integration tests (30 assertions)
-  worker.php              # FrankenPHP worker (persistent connection)
-  Caddyfile               # FrankenPHP HTTP server config
+  worker.php              # FrankenPHP worker (persistent connection + retry)
 docker/                   # Docker config (ClickHouse, FrankenPHP)
+sample/                   # Standalone Dockerfile (imports from GitHub)
+.github/workflows/        # CI: Go tests, PHP tests, build
 Makefile
 ```

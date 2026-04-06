@@ -1,0 +1,47 @@
+name: PHP Integration Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PHP dependencies
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/web:/app" \
+            composer:latest install --no-dev --no-interaction
+
+      - name: Start services
+        run: docker compose up -d --build
+
+      - name: Wait for ClickHouse
+        run: |
+          timeout 60 bash -c \
+            'until docker compose exec -T clickhouse \
+               clickhouse-client --query "SELECT 1" 2>/dev/null; \
+             do sleep 2; done'
+
+      - name: Wait for FrankenPHP (HTTP)
+        run: |
+          timeout 90 bash -c \
+            'until curl -s --max-time 5 -o /dev/null http://localhost:8080/ 2>/dev/null; \
+             do sleep 3; done'
+
+      - name: Run PHP tests
+        run: docker compose exec -T frankenphp frankenphp php-cli /app/test.php
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Stop services
+        if: always()
+        run: docker compose down

@@ -106,9 +106,10 @@ function smi2Client(): Client
 echo "\n  Bench table: $benchTable  ($insertRows rows, SELECT LIMIT $selectLimit)\n";
 separator('═');
 
-$ret = clickhouse_connect($dsn);
-if (str_starts_with($ret, 'ERROR')) {
-    fwrite(STDERR, "clickhouse_connect failed: $ret\n");
+try {
+    clickhouse_connect($dsn);
+} catch (RuntimeException $e) {
+    fwrite(STDERR, "clickhouse_connect failed: " . $e->getMessage() . "\n");
     exit(1);
 }
 clickhouse_exec("DROP TABLE IF EXISTS $benchTable");
@@ -177,10 +178,7 @@ $insRef = $smi2Ins['avg'];
 // ── 2. Go TCP + clickhouse_insert (batch) ────────────────────────────────────
 $goIns = benchGo($dsn, function () use ($benchTable, $insertFlat, $insertCols, $insertRows) {
     clickhouse_exec("TRUNCATE TABLE $benchTable");
-    $ret = clickhouse_insert($benchTable, $insertFlat, $insertCols);
-    if ($ret !== 'Ok') {
-        throw new \RuntimeException("Go insert failed: $ret");
-    }
+    clickhouse_insert($benchTable, $insertFlat, $insertCols);
     $rows = clickhouse_query_array("SELECT count() AS c FROM $benchTable");
     $cnt = (int)($rows[0]['c'] ?? 0);
     if ($cnt !== $insertRows) {
