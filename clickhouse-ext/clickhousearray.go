@@ -11,6 +11,38 @@ package clickhousephp
 #define CH_INT    2  // int8..int64  → PHP int
 #define CH_UINT   3  // uint8..uint64 → PHP int or float
 #define CH_FLOAT  4  // float32/float64 → PHP float
+#define CH_ARRAY  5  // nested zend_array* (pointer passed via uvals)
+
+// ── Array element helpers ─────────────────────────────────────────────────────
+
+static void ch_arr_add_str(zend_array* arr, const char* s, uint32_t len) {
+    zval z; ZVAL_STR(&z, zend_string_init(s, len, 0));
+    zend_hash_next_index_insert(arr, &z);
+}
+
+static void ch_arr_add_long(zend_array* arr, int64_t v) {
+    zval z; ZVAL_LONG(&z, (zend_long)v);
+    zend_hash_next_index_insert(arr, &z);
+}
+
+static void ch_arr_add_ulong(zend_array* arr, uint64_t v) {
+    zval z;
+    if (v <= (uint64_t)ZEND_LONG_MAX) ZVAL_LONG(&z, (zend_long)v);
+    else ZVAL_DOUBLE(&z, (double)v);
+    zend_hash_next_index_insert(arr, &z);
+}
+
+static void ch_arr_add_double(zend_array* arr, double v) {
+    zval z; ZVAL_DOUBLE(&z, v);
+    zend_hash_next_index_insert(arr, &z);
+}
+
+static void ch_arr_add_null(zend_array* arr) {
+    zval z; ZVAL_NULL(&z);
+    zend_hash_next_index_insert(arr, &z);
+}
+
+// ── Key interning ────────────────────────────────────────────────────────────
 
 static zend_string* ch_intern_key(const char* name, size_t len) {
     return zend_string_init_interned(name, len, 1);
@@ -52,6 +84,9 @@ static void ch_add_row(
         case CH_FLOAT:
             ZVAL_DOUBLE(&z, fvals[i]);
             break;
+        case CH_ARRAY:
+            ZVAL_ARR(&z, (zend_array*)(uintptr_t)uvals[i]);
+            break;
         default: // CH_NULL
             ZVAL_NULL(&z);
             break;
@@ -79,6 +114,7 @@ const (
 	chInt   = C.uint8_t(2)
 	chUInt  = C.uint8_t(3)
 	chFloat = C.uint8_t(4)
+	chArray = C.uint8_t(5)
 )
 
 func newResultArray(cap uint32) unsafe.Pointer {
@@ -296,7 +332,227 @@ func packCol(
 		s := (*(dest.(*decimal.Decimal))).String()
 		*sbuf = append(*sbuf, s...)
 		soff[i], slen[i], types[i] = off, C.uint32_t(len(s)), chStr
+	case kindArray:
+		arr := buildPHPArray(dest, m.inner)
+		uvals[i] = C.uint64_t(uintptr(arr))
+		types[i] = chArray
 	}
+}
+
+// ── Array builder ────────────────────────────────────────────────────────────
+
+func arrAddStr(arr *C.zend_array, s string) {
+	C.ch_arr_add_str(arr, safeCStr(s), C.uint32_t(len(s)))
+}
+
+func buildPHPArray(dest interface{}, inner *colMeta) unsafe.Pointer {
+	if inner == nil {
+		return unsafe.Pointer(C.ch_new_array(0))
+	}
+	if inner.nullable {
+		return buildNullableArray(dest, inner)
+	}
+	return buildNonNullableArray(dest, inner)
+}
+
+func buildNonNullableArray(dest interface{}, inner *colMeta) unsafe.Pointer {
+	switch inner.kind {
+	case kindString:
+		s := *(dest.(*[]string))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			arrAddStr(arr, v)
+		}
+		return unsafe.Pointer(arr)
+	case kindDateTime:
+		s := *(dest.(*[]time.Time))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			str := string(appendTimeRaw(nil, v))
+			arrAddStr(arr, str)
+		}
+		return unsafe.Pointer(arr)
+	case kindFloat32:
+		s := *(dest.(*[]float32))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			C.ch_arr_add_double(arr, C.double(v))
+		}
+		return unsafe.Pointer(arr)
+	case kindFloat64:
+		s := *(dest.(*[]float64))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			C.ch_arr_add_double(arr, C.double(v))
+		}
+		return unsafe.Pointer(arr)
+	case kindInt8:
+		s := *(dest.(*[]int8))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			C.ch_arr_add_long(arr, C.int64_t(v))
+		}
+		return unsafe.Pointer(arr)
+	case kindInt16:
+		s := *(dest.(*[]int16))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			C.ch_arr_add_long(arr, C.int64_t(v))
+		}
+		return unsafe.Pointer(arr)
+	case kindInt32:
+		s := *(dest.(*[]int32))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			C.ch_arr_add_long(arr, C.int64_t(v))
+		}
+		return unsafe.Pointer(arr)
+	case kindInt64:
+		s := *(dest.(*[]int64))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			C.ch_arr_add_long(arr, C.int64_t(v))
+		}
+		return unsafe.Pointer(arr)
+	case kindUInt8:
+		s := *(dest.(*[]uint8))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			C.ch_arr_add_ulong(arr, C.uint64_t(v))
+		}
+		return unsafe.Pointer(arr)
+	case kindUInt16:
+		s := *(dest.(*[]uint16))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			C.ch_arr_add_ulong(arr, C.uint64_t(v))
+		}
+		return unsafe.Pointer(arr)
+	case kindUInt32:
+		s := *(dest.(*[]uint32))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			C.ch_arr_add_ulong(arr, C.uint64_t(v))
+		}
+		return unsafe.Pointer(arr)
+	case kindUInt64:
+		s := *(dest.(*[]uint64))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			C.ch_arr_add_ulong(arr, C.uint64_t(v))
+		}
+		return unsafe.Pointer(arr)
+	case kindBool:
+		s := *(dest.(*[]bool))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			if v {
+				C.ch_arr_add_ulong(arr, 1)
+			} else {
+				C.ch_arr_add_ulong(arr, 0)
+			}
+		}
+		return unsafe.Pointer(arr)
+	case kindUUID:
+		s := *(dest.(*[]uuid.UUID))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			str := v.String()
+			arrAddStr(arr, str)
+		}
+		return unsafe.Pointer(arr)
+	case kindIPv4, kindIPv6:
+		s := *(dest.(*[]netip.Addr))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			str := v.String()
+			arrAddStr(arr, str)
+		}
+		return unsafe.Pointer(arr)
+	case kindDecimal:
+		s := *(dest.(*[]decimal.Decimal))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			str := v.String()
+			arrAddStr(arr, str)
+		}
+		return unsafe.Pointer(arr)
+	}
+	return unsafe.Pointer(C.ch_new_array(0))
+}
+
+func buildNullableArray(dest interface{}, inner *colMeta) unsafe.Pointer {
+	switch inner.kind {
+	case kindString:
+		s := *(dest.(*[]*string))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			if v == nil {
+				C.ch_arr_add_null(arr)
+			} else {
+				arrAddStr(arr, *v)
+			}
+		}
+		return unsafe.Pointer(arr)
+	case kindInt32:
+		s := *(dest.(*[]*int32))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			if v == nil {
+				C.ch_arr_add_null(arr)
+			} else {
+				C.ch_arr_add_long(arr, C.int64_t(*v))
+			}
+		}
+		return unsafe.Pointer(arr)
+	case kindInt64:
+		s := *(dest.(*[]*int64))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			if v == nil {
+				C.ch_arr_add_null(arr)
+			} else {
+				C.ch_arr_add_long(arr, C.int64_t(*v))
+			}
+		}
+		return unsafe.Pointer(arr)
+	case kindUInt32:
+		s := *(dest.(*[]*uint32))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			if v == nil {
+				C.ch_arr_add_null(arr)
+			} else {
+				C.ch_arr_add_ulong(arr, C.uint64_t(*v))
+			}
+		}
+		return unsafe.Pointer(arr)
+	case kindFloat64:
+		s := *(dest.(*[]*float64))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			if v == nil {
+				C.ch_arr_add_null(arr)
+			} else {
+				C.ch_arr_add_double(arr, C.double(*v))
+			}
+		}
+		return unsafe.Pointer(arr)
+	case kindUUID:
+		s := *(dest.(*[]*uuid.UUID))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			if v == nil {
+				C.ch_arr_add_null(arr)
+			} else {
+				str := v.String()
+				arrAddStr(arr, str)
+			}
+		}
+		return unsafe.Pointer(arr)
+	}
+	// Fallback: unsupported nullable inner type → empty array
+	return unsafe.Pointer(C.ch_new_array(0))
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────

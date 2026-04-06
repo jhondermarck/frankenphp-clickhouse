@@ -141,9 +141,10 @@ clickhouse_disconnect();
 | `Decimal(P,S)` | `string` | Preserves precision |
 | `Enum8`, `Enum16` | `string` | Enum name (e.g. `"active"`) |
 | `Nullable(T)` | `T` or `null` | Any supported type |
+| `Array(T)` | `array` | Indexed PHP array, any inner type |
 | `LowCardinality(T)` | same as `T` | Transparent wrapper |
 
-Types not listed above (Array, Map, Tuple) are not yet supported and will throw a `RuntimeException`.
+Types not listed above (Map, Tuple) are not yet supported and will throw a `RuntimeException`.
 
 ## DSN Format
 
@@ -182,7 +183,7 @@ clickhouse_disconnect();
 ## Testing
 
 ```bash
-make test      # 89 PHP integration tests
+make test      # 118 PHP integration tests
 make test_go   # Go unit tests
 ```
 
@@ -242,7 +243,7 @@ clickhouse-ext/
   clickhousetypes_test.go # Go unit tests
   go.mod                  # Go module (imported by Docker)
 web/
-  test.php                # PHP integration tests (89 assertions)
+  test.php                # PHP integration tests (118 assertions)
   bench.php               # INSERT + SELECT benchmark vs SMI2
   bench_http.php          # HTTP worker mode benchmark
   worker.php              # FrankenPHP worker (persistent connection + retry)

@@ -247,6 +247,71 @@ ok($r['nuid'] === null, 'Nullable(UUID) = NULL');
 clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_xtypes_test");
 
 // =============================================================================
+// Array types
+// =============================================================================
+
+suite('Array types');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_array_test");
+clickhouse_exec("CREATE TABLE clickhousephp_array_test (
+    tags Array(String),
+    scores Array(Int32),
+    prices Array(Float64),
+    flags Array(UInt8),
+    ids Array(UUID),
+    labels Array(Nullable(String))
+) ENGINE = Memory");
+
+clickhouse_exec("INSERT INTO clickhousephp_array_test VALUES
+    (['php', 'go', 'clickhouse'], [10, 20, 30], [1.5, 2.5], [1, 0, 1], ['550e8400-e29b-41d4-a716-446655440000'], ['a', NULL, 'c']),
+    ([], [], [], [], [], [])
+");
+
+$rows = clickhouse_query_array("SELECT * FROM clickhousephp_array_test ORDER BY length(tags) DESC");
+eq(count($rows), 2, 'array test row count = 2');
+
+// Row 0: populated arrays
+$r = $rows[0];
+ok(is_array($r['tags']), 'Array(String) is PHP array');
+eq(count($r['tags']), 3, 'Array(String) has 3 elements');
+eq($r['tags'][0], 'php', 'Array(String)[0] = php');
+eq($r['tags'][1], 'go', 'Array(String)[1] = go');
+eq($r['tags'][2], 'clickhouse', 'Array(String)[2] = clickhouse');
+
+ok(is_array($r['scores']), 'Array(Int32) is PHP array');
+eq(count($r['scores']), 3, 'Array(Int32) has 3 elements');
+eq($r['scores'][0], 10, 'Array(Int32)[0] = 10');
+ok(is_int($r['scores'][0]), 'Array(Int32) elements are PHP int');
+
+ok(is_array($r['prices']), 'Array(Float64) is PHP array');
+eq(count($r['prices']), 2, 'Array(Float64) has 2 elements');
+ok(abs($r['prices'][0] - 1.5) < 0.001, 'Array(Float64)[0] ~ 1.5');
+ok(is_float($r['prices'][0]), 'Array(Float64) elements are PHP float');
+
+eq(count($r['flags']), 3, 'Array(UInt8) has 3 elements');
+eq($r['flags'][0], 1, 'Array(UInt8)[0] = 1');
+eq($r['flags'][1], 0, 'Array(UInt8)[1] = 0');
+
+eq(count($r['ids']), 1, 'Array(UUID) has 1 element');
+ok(is_string($r['ids'][0]), 'Array(UUID) elements are PHP string');
+eq($r['ids'][0], '550e8400-e29b-41d4-a716-446655440000', 'Array(UUID)[0] value');
+
+ok(is_array($r['labels']), 'Array(Nullable(String)) is PHP array');
+eq(count($r['labels']), 3, 'Array(Nullable(String)) has 3 elements');
+eq($r['labels'][0], 'a', 'Array(Nullable(String))[0] = a');
+ok($r['labels'][1] === null, 'Array(Nullable(String))[1] = NULL');
+eq($r['labels'][2], 'c', 'Array(Nullable(String))[2] = c');
+
+// Row 1: empty arrays
+$r = $rows[1];
+ok(is_array($r['tags']), 'empty Array(String) is PHP array');
+eq(count($r['tags']), 0, 'empty Array(String) has 0 elements');
+eq(count($r['scores']), 0, 'empty Array(Int32) has 0 elements');
+eq(count($r['labels']), 0, 'empty Array(Nullable(String)) has 0 elements');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_array_test");
+
+// =============================================================================
 // clickhouse_exec — DDL et commandes
 // =============================================================================
 

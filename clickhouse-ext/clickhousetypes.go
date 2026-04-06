@@ -30,11 +30,13 @@ const (
 	kindIPv4
 	kindIPv6
 	kindDecimal
+	kindArray
 )
 
 type colMeta struct {
 	kind     colKind
 	nullable bool
+	inner    *colMeta // for Array(T)
 }
 
 func parseColMeta(dbType string) (colMeta, error) {
@@ -46,6 +48,14 @@ func parseColMeta(dbType string) (colMeta, error) {
 	}
 	if strings.HasPrefix(raw, "LowCardinality(") {
 		raw = raw[len("LowCardinality(") : len(raw)-1]
+	}
+	if strings.HasPrefix(raw, "Array(") {
+		innerType := raw[len("Array(") : len(raw)-1]
+		inner, err := parseColMeta(innerType)
+		if err != nil {
+			return colMeta{}, err
+		}
+		return colMeta{kind: kindArray, nullable: nullable, inner: &inner}, nil
 	}
 	if strings.HasPrefix(raw, "DateTime64") {
 		raw = "DateTime"
@@ -168,8 +178,87 @@ func allocScanDest(m colMeta) interface{} {
 		return new(netip.Addr)
 	case kindDecimal:
 		return new(decimal.Decimal)
+	case kindArray:
+		return allocArrayScanDest(m.inner)
 	}
 	return new(string)
+}
+
+func allocArrayScanDest(inner *colMeta) interface{} {
+	if inner == nil {
+		return new(interface{})
+	}
+	if inner.nullable {
+		switch inner.kind {
+		case kindString:
+			return new([]*string)
+		case kindDateTime:
+			return new([]*time.Time)
+		case kindFloat32:
+			return new([]*float32)
+		case kindFloat64:
+			return new([]*float64)
+		case kindInt8:
+			return new([]*int8)
+		case kindInt16:
+			return new([]*int16)
+		case kindInt32:
+			return new([]*int32)
+		case kindInt64:
+			return new([]*int64)
+		case kindUInt8:
+			return new([]*uint8)
+		case kindUInt16:
+			return new([]*uint16)
+		case kindUInt32:
+			return new([]*uint32)
+		case kindUInt64:
+			return new([]*uint64)
+		case kindBool:
+			return new([]*bool)
+		case kindUUID:
+			return new([]*uuid.UUID)
+		case kindIPv4, kindIPv6:
+			return new([]*netip.Addr)
+		case kindDecimal:
+			return new([]*decimal.Decimal)
+		}
+	}
+	switch inner.kind {
+	case kindString:
+		return new([]string)
+	case kindDateTime:
+		return new([]time.Time)
+	case kindFloat32:
+		return new([]float32)
+	case kindFloat64:
+		return new([]float64)
+	case kindInt8:
+		return new([]int8)
+	case kindInt16:
+		return new([]int16)
+	case kindInt32:
+		return new([]int32)
+	case kindInt64:
+		return new([]int64)
+	case kindUInt8:
+		return new([]uint8)
+	case kindUInt16:
+		return new([]uint16)
+	case kindUInt32:
+		return new([]uint32)
+	case kindUInt64:
+		return new([]uint64)
+	case kindBool:
+		return new([]bool)
+	case kindUUID:
+		return new([]uuid.UUID)
+	case kindIPv4, kindIPv6:
+		return new([]netip.Addr)
+	case kindDecimal:
+		return new([]decimal.Decimal)
+	}
+	return new(interface{})
 }
 
 // resetNullableDest sets the inner pointer of a nullable scan destination to nil.
