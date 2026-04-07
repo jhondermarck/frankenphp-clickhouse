@@ -499,6 +499,51 @@ ok($execPerIter < 1024, sprintf(
 clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_memleak_test");
 
 // =============================================================================
+// clickhouse_insert — nested rows (P0)
+// =============================================================================
+
+suite('Insert with nested rows');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_nested_test");
+clickhouse_exec("CREATE TABLE clickhousephp_nested_test (
+    name String, age UInt32, score Float64
+) ENGINE = Memory");
+
+// Nested rows: each sub-array is a row
+$rows_data = [
+    ['Alice', 30, 95.5],
+    ['Bob', 25, 87.2],
+    ['Charlie', 35, 91.0],
+];
+$r = clickhouse_insert('clickhousephp_nested_test', $rows_data, ['name', 'age', 'score']);
+eq($r, 'Ok', 'nested row insert returns Ok');
+
+$rows = clickhouse_query_array("SELECT name, age, score FROM clickhousephp_nested_test ORDER BY name");
+eq(count($rows), 3, 'nested insert: 3 rows');
+eq($rows[0]['name'], 'Alice', 'nested insert: row 0 name');
+eq($rows[0]['age'], 30, 'nested insert: row 0 age');
+eq($rows[1]['name'], 'Bob', 'nested insert: row 1 name');
+eq($rows[2]['name'], 'Charlie', 'nested insert: row 2 name');
+
+// Flat format still works
+clickhouse_exec("TRUNCATE TABLE clickhousephp_nested_test");
+$r = clickhouse_insert('clickhousephp_nested_test', ['Dave', 40, 88.0], ['name', 'age', 'score']);
+eq($r, 'Ok', 'flat insert still works');
+$rows = clickhouse_query_array("SELECT name FROM clickhousephp_nested_test");
+eq($rows[0]['name'], 'Dave', 'flat insert row verified');
+
+// Error: nested row with wrong column count
+$nestedThrew = false;
+try {
+    clickhouse_insert('clickhousephp_nested_test', [['Eve', 28]], ['name', 'age', 'score']);
+} catch (RuntimeException $e) {
+    $nestedThrew = true;
+}
+ok($nestedThrew, 'nested row with wrong column count throws');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_nested_test");
+
+// =============================================================================
 // clickhouse_insert — partial columns (P0)
 // =============================================================================
 

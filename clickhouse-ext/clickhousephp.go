@@ -165,8 +165,33 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval) un
 	if !ok {
 		return frankenphp.PHPString("Insert error: values is not an array", false)
 	}
-	if len(flat)%stride != 0 {
-		return frankenphp.PHPString(fmt.Sprintf("Insert error: %d values not divisible by %d columns", len(flat), stride), false)
+
+	// Detect nested rows: if first element is a slice, treat all elements as rows
+	var rows [][]any
+	if len(flat) > 0 {
+		if firstRow, ok := flat[0].([]any); ok {
+			// Nested mode: [[v1,v2],[v3,v4]]
+			rows = make([][]any, len(flat))
+			rows[0] = firstRow
+			for j := 1; j < len(flat); j++ {
+				row, ok := flat[j].([]any)
+				if !ok {
+					return frankenphp.PHPString(fmt.Sprintf("Insert error: row %d is not an array", j), false)
+				}
+				rows[j] = row
+			}
+		}
+	}
+
+	if rows == nil {
+		// Flat mode: [v1,v2,v3,v4,v5,v6]
+		if len(flat)%stride != 0 {
+			return frankenphp.PHPString(fmt.Sprintf("Insert error: %d values not divisible by %d columns", len(flat), stride), false)
+		}
+		rows = make([][]any, len(flat)/stride)
+		for i := 0; i < len(flat); i += stride {
+			rows[i/stride] = flat[i : i+stride]
+		}
 	}
 
 	// Build column list for the INSERT statement
@@ -186,9 +211,12 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval) un
 	}
 	defer batch.Close()
 
-	for i := 0; i < len(flat); i += stride {
-		if err := batch.Append(flat[i : i+stride]...); err != nil {
-			return frankenphp.PHPString(fmt.Sprintf("Send error (row %d): %s", i/stride, err.Error()), false)
+	for i, row := range rows {
+		if len(row) != stride {
+			return frankenphp.PHPString(fmt.Sprintf("Insert error: row %d has %d values, expected %d columns", i, len(row), stride), false)
+		}
+		if err := batch.Append(row...); err != nil {
+			return frankenphp.PHPString(fmt.Sprintf("Send error (row %d): %s", i, err.Error()), false)
 		}
 	}
 	if err := batch.Send(); err != nil {
