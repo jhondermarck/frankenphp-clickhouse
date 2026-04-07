@@ -82,10 +82,13 @@ PHP_FUNCTION(clickhouse_insert)
 PHP_FUNCTION(clickhouse_exec)
 {
     zend_string *query = NULL;
-    ZEND_PARSE_PARAMETERS_START(1, 1)
+    zval *params = NULL;
+    ZEND_PARSE_PARAMETERS_START(1, 2)
         Z_PARAM_STR(query)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY_OR_NULL(params)
     ZEND_PARSE_PARAMETERS_END();
-    zend_string *result = clickhouse_exec(query);
+    zend_string *result = clickhouse_exec(query, params);
     if (ch_throw_on_error(result)) { RETURN_THROWS(); }
     if (result) { RETURN_STR(result); }
     RETURN_EMPTY_STRING();
@@ -94,10 +97,13 @@ PHP_FUNCTION(clickhouse_exec)
 PHP_FUNCTION(clickhouse_query_array)
 {
     zend_string *query = NULL;
-    ZEND_PARSE_PARAMETERS_START(1, 1)
+    zval *params = NULL;
+    ZEND_PARSE_PARAMETERS_START(1, 2)
         Z_PARAM_STR(query)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY_OR_NULL(params)
     ZEND_PARSE_PARAMETERS_END();
-    zend_array *result = clickhouse_query_array(query);
+    zend_array *result = clickhouse_query_array(query, params);
     if (result == NULL) {
         zend_string *err = clickhouse_get_last_error();
         const char *msg = err ? ZSTR_VAL(err) : "ClickHouse query failed";

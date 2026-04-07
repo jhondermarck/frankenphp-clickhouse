@@ -225,15 +225,55 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval) un
 	return frankenphp.PHPString("Ok", false)
 }
 
+// buildQueryArgs converts a PHP params zval to clickhouse-go query arguments.
+// Associative array → clickhouse.Named params, sequential → positional args.
+func buildQueryArgs(params *C.zval) ([]any, error) {
+	if params == nil {
+		return nil, nil
+	}
+	val, err := frankenphp.GoValue[any](unsafe.Pointer(params))
+	if err != nil {
+		return nil, fmt.Errorf("params: %w", err)
+	}
+	if val == nil {
+		return nil, nil
+	}
+
+	switch v := val.(type) {
+	case []any:
+		if len(v) == 0 {
+			return nil, nil
+		}
+		return v, nil
+	case map[string]any:
+		if len(v) == 0 {
+			return nil, nil
+		}
+		args := make([]any, 0, len(v))
+		for key, value := range v {
+			args = append(args, clickhouse.Named(key, value))
+		}
+		return args, nil
+	default:
+		return nil, fmt.Errorf("params must be an array, got %T", val)
+	}
+}
+
 //export clickhouse_exec
-func clickhouse_exec(query *C.zend_string) unsafe.Pointer {
+func clickhouse_exec(query *C.zend_string, params *C.zval) unsafe.Pointer {
 	client, err := acquireConn()
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
 	defer releaseConn(client)
 	queryStr := frankenphp.GoString(unsafe.Pointer(query))
-	err = client.Exec(context.Background(), queryStr)
+
+	args, err := buildQueryArgs(params)
+	if err != nil {
+		return frankenphp.PHPString("ERROR: "+err.Error(), false)
+	}
+
+	err = client.Exec(context.Background(), queryStr, args...)
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
@@ -241,14 +281,22 @@ func clickhouse_exec(query *C.zend_string) unsafe.Pointer {
 }
 
 //export clickhouse_query_array
-func clickhouse_query_array(query *C.zend_string) unsafe.Pointer {
+func clickhouse_query_array(query *C.zend_string, params *C.zval) unsafe.Pointer {
 	client, err := acquireConn()
 	if err != nil {
 		setLastError(err.Error())
 		return nil
 	}
 	queryStr := frankenphp.GoString(unsafe.Pointer(query))
-	rows, qerr := client.Query(context.Background(), queryStr)
+
+	args, err := buildQueryArgs(params)
+	if err != nil {
+		releaseConn(client)
+		setLastError(err.Error())
+		return nil
+	}
+
+	rows, qerr := client.Query(context.Background(), queryStr, args...)
 	if qerr != nil {
 		releaseConn(client)
 		setLastError(qerr.Error())

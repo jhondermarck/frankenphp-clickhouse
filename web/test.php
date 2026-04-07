@@ -595,6 +595,48 @@ eq($rows[0]['ts'], '2024-01-15 10:30:45.000000', 'DateTime64 with zero microseco
 clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_dt64_test");
 
 // =============================================================================
+// Parameter bindings (P1)
+// =============================================================================
+
+suite('Parameter bindings');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_bind_test");
+clickhouse_exec("CREATE TABLE clickhousephp_bind_test (
+    id UInt32, name String, score Float64
+) ENGINE = Memory");
+clickhouse_exec("INSERT INTO clickhousephp_bind_test VALUES (1, 'Alice', 95.5), (2, 'Bob', 87.2), (3, 'Charlie', 91.0)");
+
+// Named parameters with query_array
+$rows = clickhouse_query_array(
+    "SELECT * FROM clickhousephp_bind_test WHERE name = {name:String}",
+    ['name' => 'Alice']
+);
+eq(count($rows), 1, 'named param: 1 row');
+eq($rows[0]['name'], 'Alice', 'named param: correct row');
+
+// Named parameters with exec
+clickhouse_exec(
+    "INSERT INTO clickhousephp_bind_test VALUES ({id:UInt32}, {name:String}, {score:Float64})",
+    ['id' => 4, 'name' => 'Dave', 'score' => 88.0]
+);
+$rows = clickhouse_query_array("SELECT * FROM clickhousephp_bind_test WHERE id = 4");
+eq(count($rows), 1, 'exec named param: inserted');
+eq($rows[0]['name'], 'Dave', 'exec named param: correct value');
+
+// Without params (backward compat)
+$rows = clickhouse_query_array("SELECT * FROM clickhousephp_bind_test ORDER BY id");
+eq(count($rows), 4, 'no params: backward compat works');
+
+// Multiple named parameters
+$rows = clickhouse_query_array(
+    "SELECT * FROM clickhousephp_bind_test WHERE score > {min:Float64} AND score < {max:Float64} ORDER BY name",
+    ['min' => 88.0, 'max' => 96.0]
+);
+eq(count($rows), 2, 'multiple named params: 2 rows');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_bind_test");
+
+// =============================================================================
 // Cleanup
 // =============================================================================
 
