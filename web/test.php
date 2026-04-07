@@ -677,6 +677,24 @@ ok(abs($rows[0]['score'] - 0.0) < 0.001, 'assoc partial: default score applied')
 
 clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_assoc_test");
 
+// Error: flat values without columns
+$flatNoColThrew = false;
+try {
+    clickhouse_insert('clickhousephp_assoc_test', ['a', 1, 2.0]);
+} catch (RuntimeException $e) {
+    $flatNoColThrew = true;
+}
+ok($flatNoColThrew, 'flat values without columns throws');
+
+// Error: nested sequential without columns
+$nestedNoColThrew = false;
+try {
+    clickhouse_insert('clickhousephp_assoc_test', [['a', 1], ['b', 2]]);
+} catch (RuntimeException $e) {
+    $nestedNoColThrew = true;
+}
+ok($nestedNoColThrew, 'nested sequential without columns throws');
+
 // =============================================================================
 // Cleanup
 // =============================================================================
