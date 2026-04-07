@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -190,6 +191,7 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval) un
 			for k := range first {
 				colNames = append(colNames, k)
 			}
+			sort.Strings(colNames)
 		}
 		rows = make([][]any, len(flat))
 		for j, item := range flat {

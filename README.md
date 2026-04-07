@@ -74,11 +74,11 @@ Parameters: 3 warmup + 20 iterations.
 ## PHP API
 
 ```php
-clickhouse_connect(string $dsn): string         // "Ok" or throws RuntimeException
-clickhouse_query_array(string $query): array    // [['col' => val, ...], ...] or throws
-clickhouse_exec(string $query): string          // "Ok" or throws RuntimeException
-clickhouse_insert(string $table, array $values, array $columns): string  // "Ok" or throws
-clickhouse_disconnect(): string                 // "Ok" or throws RuntimeException
+clickhouse_connect(string $dsn): string
+clickhouse_query_array(string $query, ?array $params = null): array
+clickhouse_exec(string $query, ?array $params = null): string
+clickhouse_insert(string $table, array $values, ?array $columns = null): string
+clickhouse_disconnect(): string
 ```
 
 All functions throw `RuntimeException` on error. The exception message contains the ClickHouse error detail.
@@ -109,17 +109,35 @@ clickhouse_connect('clickhouse://default@localhost:9000/mydb');
 
 // SELECT → native PHP array, no json_decode
 $events = clickhouse_query_array('SELECT * FROM events LIMIT 50000');
-// [['id' => 'abc', 'start' => '2024-01-15T08:00:00Z', ...], ...]
+// [['id' => 'abc', 'start' => '2024-01-15 08:00:00', ...], ...]
+
+// SELECT with named parameters (prevents SQL injection)
+$rows = clickhouse_query_array(
+    'SELECT * FROM events WHERE machine_id = {machine:String} AND start > {after:DateTime}',
+    ['machine' => 'M-001', 'after' => '2024-01-01 00:00:00']
+);
 
 // DDL
 clickhouse_exec('TRUNCATE TABLE staging');
 
-// Batch INSERT via flat array
+// Batch INSERT — flat array (original format)
 $values = [];
 foreach ($data as $row) {
     array_push($values, $row['id'], $row['start'], $row['end'], $row['machine_id'], $row['type']);
 }
 clickhouse_insert('staging', $values, ['id', 'start', 'end', 'machine_id', 'type']);
+
+// Batch INSERT — nested rows
+clickhouse_insert('staging', [
+    ['evt-1', '2024-01-01 08:00:00', '2024-01-01 09:00:00', 'M-001', 'run'],
+    ['evt-2', '2024-01-01 10:00:00', '2024-01-01 11:00:00', 'M-002', 'idle'],
+], ['id', 'start', 'end', 'machine_id', 'type']);
+
+// Batch INSERT — associative arrays (columns inferred from keys)
+clickhouse_insert('staging', [
+    ['id' => 'evt-3', 'machine_id' => 'M-001', 'type' => 'run'],
+    ['id' => 'evt-4', 'machine_id' => 'M-002', 'type' => 'idle'],
+]);
 
 clickhouse_disconnect();
 ```
@@ -129,8 +147,9 @@ clickhouse_disconnect();
 | ClickHouse Type | PHP Type | Notes |
 |----------------|----------|-------|
 | `String`, `FixedString` | `string` | |
-| `DateTime`, `DateTime64` | `string` | Formatted as RFC3339Nano |
-| `Date`, `Date32` | `string` | Formatted as RFC3339 |
+| `DateTime` | `string` | `Y-m-d H:i:s` (e.g. `"2024-01-15 08:00:00"`) |
+| `DateTime64` | `string` | `Y-m-d H:i:s.u` (e.g. `"2024-01-15 08:00:00.123456"`) |
+| `Date`, `Date32` | `string` | `Y-m-d H:i:s` (time part is `00:00:00`) |
 | `Int8`, `Int16`, `Int32`, `Int64` | `int` | |
 | `UInt8`, `UInt16`, `UInt32` | `int` | |
 | `UInt64` | `int` or `float` | `float` if > PHP_INT_MAX |
