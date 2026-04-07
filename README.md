@@ -44,28 +44,24 @@ $rows = [['id'=>..., 'start'=>...], ...]
 
 Machine: Apple M-series, ClickHouse on localhost.
 Baseline: smi2/phpclickhouse (HTTP + `json_decode`).
-Parameters: 3 warmup + 20 iterations.
+Parameters: 3 warmup + 20 iterations, 100k rows.
 
-### SELECT
-
-```
-  Rows       SMI2 avg    Go avg     vs SMI2
-  ─────────────────────────────────────────
-    1 000     0.005s     0.002s      ×3.13
-   10 000     0.035s     0.009s      ×3.91
-  100 000     0.366s     0.043s      ×8.47
-1 000 000     3.861s     0.389s      ×9.93
-```
-
-### INSERT (batch)
+### SELECT (100k rows)
 
 ```
-  Rows       SMI2 avg    Go avg     vs SMI2    Go rows/s
-  ───────────────────────────────────────────────────────
-    1 000     0.012s     0.006s      ×2.08      179 153
-   10 000     0.052s     0.021s      ×2.48      473 727
-  100 000     0.494s     0.157s      ×3.14      635 762
-1 000 000     4.911s     1.668s      ×2.94      599 464
+  Method                          avg      min      p95      rows    vs SMI2
+  ──────────────────────────────────────────────────────────────────────────
+  SMI2 – HTTP + php-array        0.394s   0.337s   0.530s   100,000   ref
+  Go TCP + query_array            0.046s   0.043s   0.062s   100,000  ×8.51
+```
+
+### INSERT (100k rows batch)
+
+```
+  Method                          avg      min      p95      rows/s   vs SMI2
+  ──────────────────────────────────────────────────────────────────────────
+  SMI2 – HTTP insert             0.496s   0.475s   0.547s   201,560   ref
+  Go TCP + clickhouse_insert     0.172s   0.149s   0.225s   581,786  ×2.89
 ```
 
 > INSERT variance comes from MergeTree background merges on the ClickHouse side, not the code.
