@@ -556,6 +556,30 @@ func buildNullableArray(dest interface{}, inner *colMeta) unsafe.Pointer {
 			}
 		}
 		return unsafe.Pointer(arr)
+	case kindDateTime:
+		s := *(dest.(*[]*time.Time))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			if v == nil {
+				C.ch_arr_add_null(arr)
+			} else {
+				str := string(appendClickHouseDateTime(nil, *v))
+				arrAddStr(arr, str)
+			}
+		}
+		return unsafe.Pointer(arr)
+	case kindDateTime64:
+		s := *(dest.(*[]*time.Time))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			if v == nil {
+				C.ch_arr_add_null(arr)
+			} else {
+				str := string(appendClickHouseDateTime64(nil, *v))
+				arrAddStr(arr, str)
+			}
+		}
+		return unsafe.Pointer(arr)
 	case kindUUID:
 		s := *(dest.(*[]*uuid.UUID))
 		arr := C.ch_new_array(C.uint32_t(len(s)))

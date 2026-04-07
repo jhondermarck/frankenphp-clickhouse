@@ -38,7 +38,7 @@ $rows = [['id'=>..., 'start'=>...], ...]
 | Scan | `rows.Scan()` into typed destinations allocated once |
 | Serialization | `packCol()` — cumulative byte buffer, zero allocation in the hot loop |
 | PHP array | `ch_add_row()` — direct C construction, no intermediate serialization |
-| DateTime | `appendTimeRaw()` — RFC3339 formatting without `time.Format` or allocation |
+| DateTime | `appendClickHouseDateTime()` / `appendClickHouseDateTime64()` — ClickHouse-native formatting without `time.Format` or allocation |
 
 ## Benchmarks
 
