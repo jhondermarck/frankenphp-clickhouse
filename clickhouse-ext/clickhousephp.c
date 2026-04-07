@@ -59,10 +59,11 @@ PHP_FUNCTION(clickhouse_insert)
     zend_string *table = NULL;
     zval *values = NULL;
     zval *columns = NULL;
-    ZEND_PARSE_PARAMETERS_START(3, 3)
+    ZEND_PARSE_PARAMETERS_START(2, 3)
         Z_PARAM_STR(table)
         Z_PARAM_ARRAY(values)
-        Z_PARAM_ARRAY(columns)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY_OR_NULL(columns)
     ZEND_PARSE_PARAMETERS_END();
     zend_string *result = clickhouse_insert(table, values, columns);
     if (ch_throw_on_error(result)) { RETURN_THROWS(); }

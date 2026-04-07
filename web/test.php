@@ -637,6 +637,47 @@ eq(count($rows), 2, 'multiple named params: 2 rows');
 clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_bind_test");
 
 // =============================================================================
+// clickhouse_insert — associative arrays (P2)
+// =============================================================================
+
+suite('Insert with associative arrays');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_assoc_test");
+clickhouse_exec("CREATE TABLE clickhousephp_assoc_test (
+    id UInt32, name String, score Float64
+) ENGINE = Memory");
+
+// Associative rows — columns inferred from keys
+$r = clickhouse_insert('clickhousephp_assoc_test', [
+    ['id' => 1, 'name' => 'Alice', 'score' => 95.5],
+    ['id' => 2, 'name' => 'Bob', 'score' => 87.2],
+]);
+eq($r, 'Ok', 'assoc insert returns Ok');
+
+$rows = clickhouse_query_array("SELECT * FROM clickhousephp_assoc_test ORDER BY id");
+eq(count($rows), 2, 'assoc insert: 2 rows');
+eq($rows[0]['name'], 'Alice', 'assoc insert: row 0 name');
+eq($rows[1]['name'], 'Bob', 'assoc insert: row 1 name');
+
+// Associative rows with partial columns (only id + name)
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_assoc_test");
+clickhouse_exec("CREATE TABLE clickhousephp_assoc_test (
+    id UInt32, name String, score Float64 DEFAULT 0.0
+) ENGINE = Memory");
+
+$r = clickhouse_insert('clickhousephp_assoc_test', [
+    ['id' => 1, 'name' => 'Alice'],
+    ['id' => 2, 'name' => 'Bob'],
+]);
+eq($r, 'Ok', 'assoc partial insert returns Ok');
+
+$rows = clickhouse_query_array("SELECT * FROM clickhousephp_assoc_test ORDER BY id");
+eq($rows[0]['name'], 'Alice', 'assoc partial: row 0 name');
+ok(abs($rows[0]['score'] - 0.0) < 0.001, 'assoc partial: default score applied');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_assoc_test");
+
+// =============================================================================
 // Cleanup
 // =============================================================================
 

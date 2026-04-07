@@ -144,19 +144,30 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval) un
 	defer releaseConn(client)
 	tableName := frankenphp.GoString(unsafe.Pointer(table))
 
-	colAny, err := frankenphp.GoValue[any](unsafe.Pointer(columns))
-	if err != nil {
-		return frankenphp.PHPString("Insert error (columns): "+err.Error(), false)
-	}
-	colSlice, ok := colAny.([]any)
-	if !ok {
-		return frankenphp.PHPString("Insert error: columns is not an array", false)
-	}
-	stride := len(colSlice)
-	if stride == 0 {
-		return frankenphp.PHPString("Insert error: empty columns", false)
+	// Parse columns (optional — may be nil or empty)
+	var colNames []string
+	if columns != nil {
+		colAny, err := frankenphp.GoValue[any](unsafe.Pointer(columns))
+		if err != nil {
+			return frankenphp.PHPString("Insert error (columns): "+err.Error(), false)
+		}
+		if colAny != nil {
+			colSlice, ok := colAny.([]any)
+			if !ok {
+				return frankenphp.PHPString("Insert error: columns is not an array", false)
+			}
+			colNames = make([]string, len(colSlice))
+			for i, c := range colSlice {
+				s, ok := c.(string)
+				if !ok {
+					return frankenphp.PHPString("Insert error: column name is not a string", false)
+				}
+				colNames[i] = s
+			}
+		}
 	}
 
+	// Parse values
 	valAny, err := frankenphp.GoValue[any](unsafe.Pointer(values))
 	if err != nil {
 		return frankenphp.PHPString("Insert error: "+err.Error(), false)
@@ -165,26 +176,53 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval) un
 	if !ok {
 		return frankenphp.PHPString("Insert error: values is not an array", false)
 	}
-
-	// Detect nested rows: if first element is a slice, treat all elements as rows
-	var rows [][]any
-	if len(flat) > 0 {
-		if firstRow, ok := flat[0].([]any); ok {
-			// Nested mode: [[v1,v2],[v3,v4]]
-			rows = make([][]any, len(flat))
-			rows[0] = firstRow
-			for j := 1; j < len(flat); j++ {
-				row, ok := flat[j].([]any)
-				if !ok {
-					return frankenphp.PHPString(fmt.Sprintf("Insert error: row %d is not an array", j), false)
-				}
-				rows[j] = row
-			}
-		}
+	if len(flat) == 0 {
+		return frankenphp.PHPString("Ok", false)
 	}
 
-	if rows == nil {
-		// Flat mode: [v1,v2,v3,v4,v5,v6]
+	// Detect format: associative rows, nested sequential rows, or flat
+	var rows [][]any
+	switch first := flat[0].(type) {
+	case map[string]any:
+		// Associative rows: [['id' => 1, 'name' => 'foo'], ...]
+		if len(colNames) == 0 {
+			colNames = make([]string, 0, len(first))
+			for k := range first {
+				colNames = append(colNames, k)
+			}
+		}
+		rows = make([][]any, len(flat))
+		for j, item := range flat {
+			m, ok := item.(map[string]any)
+			if !ok {
+				return frankenphp.PHPString(fmt.Sprintf("Insert error: row %d is not an associative array", j), false)
+			}
+			row := make([]any, len(colNames))
+			for ci, col := range colNames {
+				row[ci] = m[col]
+			}
+			rows[j] = row
+		}
+	case []any:
+		// Nested sequential rows: [[v1, v2], [v3, v4]]
+		if len(colNames) == 0 {
+			return frankenphp.PHPString("Insert error: columns required for sequential arrays", false)
+		}
+		rows = make([][]any, len(flat))
+		rows[0] = first
+		for j := 1; j < len(flat); j++ {
+			row, ok := flat[j].([]any)
+			if !ok {
+				return frankenphp.PHPString(fmt.Sprintf("Insert error: row %d is not an array", j), false)
+			}
+			rows[j] = row
+		}
+	default:
+		// Flat mode: [v1, v2, v3, v4, v5, v6]
+		if len(colNames) == 0 {
+			return frankenphp.PHPString("Insert error: columns required for flat values", false)
+		}
+		stride := len(colNames)
 		if len(flat)%stride != 0 {
 			return frankenphp.PHPString(fmt.Sprintf("Insert error: %d values not divisible by %d columns", len(flat), stride), false)
 		}
@@ -194,25 +232,22 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval) un
 		}
 	}
 
-	// Build column list for the INSERT statement
-	colNames := make([]string, stride)
-	for i, c := range colSlice {
-		s, ok := c.(string)
-		if !ok {
-			return frankenphp.PHPString("Insert error: column name is not a string", false)
-		}
-		colNames[i] = s
+	// Build INSERT statement with column list
+	insertSQL := "INSERT INTO " + tableName
+	if len(colNames) > 0 {
+		insertSQL += " (" + strings.Join(colNames, ", ") + ")"
 	}
 
 	ctx := context.Background()
-	batch, err := client.PrepareBatch(ctx, "INSERT INTO "+tableName+" ("+strings.Join(colNames, ", ")+")")
+	batch, err := client.PrepareBatch(ctx, insertSQL)
 	if err != nil {
 		return frankenphp.PHPString("Send error: "+err.Error(), false)
 	}
 	defer batch.Close()
 
+	stride := len(colNames)
 	for i, row := range rows {
-		if len(row) != stride {
+		if stride > 0 && len(row) != stride {
 			return frankenphp.PHPString(fmt.Sprintf("Insert error: row %d has %d values, expected %d columns", i, len(row), stride), false)
 		}
 		if err := batch.Append(row...); err != nil {
