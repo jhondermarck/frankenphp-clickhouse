@@ -15,6 +15,7 @@ type colKind int
 const (
 	kindString colKind = iota
 	kindDateTime
+	kindDateTime64
 	kindFloat32
 	kindFloat64
 	kindInt8
@@ -58,7 +59,7 @@ func parseColMeta(dbType string) (colMeta, error) {
 		return colMeta{kind: kindArray, nullable: nullable, inner: &inner}, nil
 	}
 	if strings.HasPrefix(raw, "DateTime64") {
-		raw = "DateTime"
+		return colMeta{kind: kindDateTime64, nullable: nullable}, nil
 	}
 	if strings.HasPrefix(raw, "Enum8") || strings.HasPrefix(raw, "Enum16") {
 		raw = "String" // driver returns enum name as string
@@ -115,6 +116,8 @@ func allocScanDest(m colMeta) interface{} {
 			return new(*string)
 		case kindDateTime:
 			return new(*time.Time)
+		case kindDateTime64:
+			return new(*time.Time)
 		case kindFloat32:
 			return new(*float32)
 		case kindFloat64:
@@ -149,6 +152,8 @@ func allocScanDest(m colMeta) interface{} {
 	case kindString:
 		return new(string)
 	case kindDateTime:
+		return new(time.Time)
+	case kindDateTime64:
 		return new(time.Time)
 	case kindFloat32:
 		return new(float32)
@@ -194,6 +199,8 @@ func allocArrayScanDest(inner *colMeta) interface{} {
 			return new([]*string)
 		case kindDateTime:
 			return new([]*time.Time)
+		case kindDateTime64:
+			return new([]*time.Time)
 		case kindFloat32:
 			return new([]*float32)
 		case kindFloat64:
@@ -228,6 +235,8 @@ func allocArrayScanDest(inner *colMeta) interface{} {
 	case kindString:
 		return new([]string)
 	case kindDateTime:
+		return new([]time.Time)
+	case kindDateTime64:
 		return new([]time.Time)
 	case kindFloat32:
 		return new([]float32)
@@ -270,6 +279,8 @@ func resetNullableDest(k colKind, dest interface{}) {
 		*(dest.(*(*string))) = nil
 	case kindDateTime:
 		*(dest.(*(*time.Time))) = nil
+	case kindDateTime64:
+		*(dest.(*(*time.Time))) = nil
 	case kindFloat32:
 		*(dest.(*(*float32))) = nil
 	case kindFloat64:
@@ -301,14 +312,11 @@ func resetNullableDest(k colKind, dest interface{}) {
 	}
 }
 
-// appendTimeRaw appends t in RFC3339Nano format (without quotes) to b.
-func appendTimeRaw(b []byte, t time.Time) []byte {
+// appendClickHouseDateTime appends t as "YYYY-MM-DD HH:MM:SS" to b.
+func appendClickHouseDateTime(b []byte, t time.Time) []byte {
 	year, month, day := t.Date()
 	hour, min, sec := t.Clock()
-	ns := t.Nanosecond()
-	_, offset := t.Zone()
-
-	b = append(b,
+	return append(b,
 		byte('0'+year/1000),
 		byte('0'+(year/100)%10),
 		byte('0'+(year/10)%10),
@@ -319,7 +327,7 @@ func appendTimeRaw(b []byte, t time.Time) []byte {
 		'-',
 		byte('0'+day/10),
 		byte('0'+day%10),
-		'T',
+		' ',
 		byte('0'+hour/10),
 		byte('0'+hour%10),
 		':',
@@ -329,32 +337,19 @@ func appendTimeRaw(b []byte, t time.Time) []byte {
 		byte('0'+sec/10),
 		byte('0'+sec%10),
 	)
-	if ns != 0 {
-		var d [9]byte
-		n := ns
-		for i := 8; i >= 0; i-- {
-			d[i] = byte('0' + n%10)
-			n /= 10
-		}
-		end := 9
-		for end > 1 && d[end-1] == '0' {
-			end--
-		}
-		b = append(b, '.')
-		b = append(b, d[:end]...)
-	}
-	if offset == 0 {
-		b = append(b, 'Z')
-	} else {
-		if offset < 0 {
-			b = append(b, '-')
-			offset = -offset
-		} else {
-			b = append(b, '+')
-		}
-		h := offset / 3600
-		m := (offset % 3600) / 60
-		b = append(b, byte('0'+h/10), byte('0'+h%10), ':', byte('0'+m/10), byte('0'+m%10))
-	}
-	return b
+}
+
+// appendClickHouseDateTime64 appends t as "YYYY-MM-DD HH:MM:SS.nnnnnn" to b.
+// Always includes 6-digit microsecond precision.
+func appendClickHouseDateTime64(b []byte, t time.Time) []byte {
+	b = appendClickHouseDateTime(b, t)
+	us := t.Nanosecond() / 1000 // microseconds
+	return append(b, '.',
+		byte('0'+us/100000),
+		byte('0'+(us/10000)%10),
+		byte('0'+(us/1000)%10),
+		byte('0'+(us/100)%10),
+		byte('0'+(us/10)%10),
+		byte('0'+us%10),
+	)
 }

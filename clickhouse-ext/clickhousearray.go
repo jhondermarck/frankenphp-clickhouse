@@ -184,6 +184,13 @@ func packCol(
 				return
 			}
 			dest = *pp
+		case kindDateTime64:
+			pp := dest.(*(*time.Time))
+			if *pp == nil {
+				types[i] = chNull
+				return
+			}
+			dest = *pp
 		case kindFloat32:
 			pp := dest.(*(*float32))
 			if *pp == nil {
@@ -291,7 +298,10 @@ func packCol(
 		*sbuf = append(*sbuf, s...)
 		soff[i], slen[i], types[i] = off, C.uint32_t(len(s)), chStr
 	case kindDateTime:
-		*sbuf = appendTimeRaw(*sbuf, *(dest.(*time.Time)))
+		*sbuf = appendClickHouseDateTime(*sbuf, *(dest.(*time.Time)))
+		soff[i], slen[i], types[i] = off, C.uint32_t(uint32(len(*sbuf))-uint32(off)), chStr
+	case kindDateTime64:
+		*sbuf = appendClickHouseDateTime64(*sbuf, *(dest.(*time.Time)))
 		soff[i], slen[i], types[i] = off, C.uint32_t(uint32(len(*sbuf))-uint32(off)), chStr
 	case kindFloat32:
 		fvals[i], types[i] = C.double(*(dest.(*float32))), chFloat
@@ -368,7 +378,15 @@ func buildNonNullableArray(dest interface{}, inner *colMeta) unsafe.Pointer {
 		s := *(dest.(*[]time.Time))
 		arr := C.ch_new_array(C.uint32_t(len(s)))
 		for _, v := range s {
-			str := string(appendTimeRaw(nil, v))
+			str := string(appendClickHouseDateTime(nil, v))
+			arrAddStr(arr, str)
+		}
+		return unsafe.Pointer(arr)
+	case kindDateTime64:
+		s := *(dest.(*[]time.Time))
+		arr := C.ch_new_array(C.uint32_t(len(s)))
+		for _, v := range s {
+			str := string(appendClickHouseDateTime64(nil, v))
 			arrAddStr(arr, str)
 		}
 		return unsafe.Pointer(arr)

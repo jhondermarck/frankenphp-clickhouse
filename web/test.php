@@ -91,8 +91,10 @@ ok(array_key_exists('event_type_id', $r), 'key event_type_id exists');
 eq($r['id'],            'evt-1',     'row 0 id');
 eq($r['machine_id'],    'machine-A', 'row 0 machine_id');
 eq($r['event_type_id'], 'type-X',    'row 0 event_type_id');
-ok(str_starts_with($r['start'], '2024-01-01'), 'row 0 start is ISO date');
-ok(str_starts_with($r['end'],   '2024-01-01'), 'row 0 end is ISO date');
+ok(str_starts_with($r['start'], '2024-01-01'), 'row 0 start date prefix');
+ok(str_starts_with($r['end'],   '2024-01-01'), 'row 0 end date prefix');
+eq($r['start'], '2024-01-01 08:00:00', 'DateTime format is Y-m-d H:i:s');
+eq($r['end'], '2024-01-01 09:00:00', 'DateTime end format is Y-m-d H:i:s');
 
 // Row 1 = evt-2
 eq($result[1]['id'],            'evt-2',     'row 1 id');
@@ -570,6 +572,27 @@ ok(abs($rows[0]['value'] - 0.0) < 0.001, 'partial insert: default value applied'
 eq($rows[0]['meta'], 'none', 'partial insert: default meta applied');
 
 clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_partial_test");
+
+// =============================================================================
+// DateTime64 format (P1)
+// =============================================================================
+
+suite('DateTime64 format');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_dt64_test");
+clickhouse_exec("CREATE TABLE clickhousephp_dt64_test (
+    ts DateTime64(6)
+) ENGINE = Memory");
+
+clickhouse_exec("INSERT INTO clickhousephp_dt64_test VALUES ('2024-01-15 10:30:45.123456')");
+$rows = clickhouse_query_array("SELECT * FROM clickhousephp_dt64_test");
+eq($rows[0]['ts'], '2024-01-15 10:30:45.123456', 'DateTime64(6) format is Y-m-d H:i:s.u');
+
+clickhouse_exec("INSERT INTO clickhousephp_dt64_test VALUES ('2024-01-15 10:30:45')");
+$rows = clickhouse_query_array("SELECT * FROM clickhousephp_dt64_test ORDER BY ts");
+eq($rows[0]['ts'], '2024-01-15 10:30:45.000000', 'DateTime64 with zero microseconds');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_dt64_test");
 
 // =============================================================================
 // Cleanup
