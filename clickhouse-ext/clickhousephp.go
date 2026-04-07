@@ -182,20 +182,31 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval) un
 	}
 
 	// Detect format: associative rows, nested sequential rows, or flat
+	// Helper: extract map from any (handles both map[string]any and AssociativeArray)
+	asMap := func(v any) (map[string]any, bool) {
+		switch m := v.(type) {
+		case map[string]any:
+			return m, true
+		case frankenphp.AssociativeArray[any]:
+			return m.Map, true
+		default:
+			return nil, false
+		}
+	}
+
 	var rows [][]any
-	switch first := flat[0].(type) {
-	case map[string]any:
+	if firstMap, ok := asMap(flat[0]); ok {
 		// Associative rows: [['id' => 1, 'name' => 'foo'], ...]
 		if len(colNames) == 0 {
-			colNames = make([]string, 0, len(first))
-			for k := range first {
+			colNames = make([]string, 0, len(firstMap))
+			for k := range firstMap {
 				colNames = append(colNames, k)
 			}
 			sort.Strings(colNames)
 		}
 		rows = make([][]any, len(flat))
 		for j, item := range flat {
-			m, ok := item.(map[string]any)
+			m, ok := asMap(item)
 			if !ok {
 				return frankenphp.PHPString(fmt.Sprintf("Insert error: row %d is not an associative array", j), false)
 			}
@@ -205,7 +216,7 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval) un
 			}
 			rows[j] = row
 		}
-	case []any:
+	} else if first, ok := flat[0].([]any); ok {
 		// Nested sequential rows: [[v1, v2], [v3, v4]]
 		if len(colNames) == 0 {
 			return frankenphp.PHPString("Insert error: columns required for sequential arrays", false)
@@ -219,7 +230,7 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval) un
 			}
 			rows[j] = row
 		}
-	default:
+	} else {
 		// Flat mode: [v1, v2, v3, v4, v5, v6]
 		if len(colNames) == 0 {
 			return frankenphp.PHPString("Insert error: columns required for flat values", false)
@@ -288,6 +299,15 @@ func buildQueryArgs(params *C.zval) ([]any, error) {
 		}
 		args := make([]any, 0, len(v))
 		for key, value := range v {
+			args = append(args, clickhouse.Named(key, value))
+		}
+		return args, nil
+	case frankenphp.AssociativeArray[any]:
+		if len(v.Map) == 0 {
+			return nil, nil
+		}
+		args := make([]any, 0, len(v.Map))
+		for key, value := range v.Map {
 			args = append(args, clickhouse.Named(key, value))
 		}
 		return args, nil
