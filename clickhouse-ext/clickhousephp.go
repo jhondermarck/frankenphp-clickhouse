@@ -169,8 +169,18 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval) un
 		return frankenphp.PHPString(fmt.Sprintf("Insert error: %d values not divisible by %d columns", len(flat), stride), false)
 	}
 
+	// Build column list for the INSERT statement
+	colNames := make([]string, stride)
+	for i, c := range colSlice {
+		s, ok := c.(string)
+		if !ok {
+			return frankenphp.PHPString("Insert error: column name is not a string", false)
+		}
+		colNames[i] = s
+	}
+
 	ctx := context.Background()
-	batch, err := client.PrepareBatch(ctx, "INSERT INTO "+tableName)
+	batch, err := client.PrepareBatch(ctx, "INSERT INTO "+tableName+" ("+strings.Join(colNames, ", ")+")")
 	if err != nil {
 		return frankenphp.PHPString("Send error: "+err.Error(), false)
 	}

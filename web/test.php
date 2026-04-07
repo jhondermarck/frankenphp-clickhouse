@@ -499,6 +499,34 @@ ok($execPerIter < 1024, sprintf(
 clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_memleak_test");
 
 // =============================================================================
+// clickhouse_insert — partial columns (P0)
+// =============================================================================
+
+suite('Insert with partial columns');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_partial_test");
+clickhouse_exec("CREATE TABLE clickhousephp_partial_test (
+    id UInt32,
+    name String,
+    value Float64 DEFAULT 0.0,
+    created DateTime DEFAULT now(),
+    meta String DEFAULT 'none'
+) ENGINE = Memory");
+
+// Insert only id + name, other columns should use defaults
+$r = clickhouse_insert('clickhousephp_partial_test', [1, 'Alice', 2, 'Bob'], ['id', 'name']);
+eq($r, 'Ok', 'partial column insert returns Ok');
+
+$rows = clickhouse_query_array("SELECT id, name, value, meta FROM clickhousephp_partial_test ORDER BY id");
+eq(count($rows), 2, 'partial insert: 2 rows');
+eq($rows[0]['id'], 1, 'partial insert: row 0 id');
+eq($rows[0]['name'], 'Alice', 'partial insert: row 0 name');
+ok(abs($rows[0]['value'] - 0.0) < 0.001, 'partial insert: default value applied');
+eq($rows[0]['meta'], 'none', 'partial insert: default meta applied');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_partial_test");
+
+// =============================================================================
 // Cleanup
 // =============================================================================
 
