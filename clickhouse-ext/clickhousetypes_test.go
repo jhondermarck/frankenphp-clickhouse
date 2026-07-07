@@ -49,3 +49,58 @@ func BenchmarkAppendClickHouseDateTime(b *testing.B) {
 		buf = appendClickHouseDateTime(buf[:0], t)
 	}
 }
+
+func TestParseColMeta(t *testing.T) {
+	cases := []struct {
+		dbType   string
+		kind     colKind
+		nullable bool
+	}{
+		{"String", kindString, false},
+		{"FixedString(16)", kindString, false},
+		{"Enum8('a' = 1, 'b' = 2)", kindString, false},
+		{"DateTime", kindDateTime, false},
+		{"DateTime('Europe/Paris')", kindDateTime, false},
+		{"DateTime64(3, 'UTC')", kindDateTime64, false},
+		{"Date", kindDateTime, false},
+		{"Date32", kindDateTime, false},
+		{"UUID", kindUUID, false},
+		{"Bool", kindBool, false},
+		{"Decimal(18, 4)", kindDecimal, false},
+		{"Nullable(String)", kindString, true},
+		{"LowCardinality(String)", kindString, false},
+		{"LowCardinality(Nullable(String))", kindString, true},
+		{"Nullable(LowCardinality(String))", kindString, true},
+		{"LowCardinality(FixedString(3))", kindString, false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.dbType, func(t *testing.T) {
+			m, err := parseColMeta(tt.dbType)
+			if err != nil {
+				t.Fatalf("parseColMeta(%q) error: %v", tt.dbType, err)
+			}
+			if m.kind != tt.kind || m.nullable != tt.nullable {
+				t.Errorf("parseColMeta(%q) = {kind:%d nullable:%v}, want {kind:%d nullable:%v}",
+					tt.dbType, m.kind, m.nullable, tt.kind, tt.nullable)
+			}
+		})
+	}
+}
+
+func TestParseColMetaArray(t *testing.T) {
+	m, err := parseColMeta("Array(LowCardinality(Nullable(String)))")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.kind != kindArray || m.inner == nil || m.inner.kind != kindString || !m.inner.nullable {
+		t.Errorf("Array(LowCardinality(Nullable(String))) parsed incorrectly: %+v", m)
+	}
+}
+
+func TestParseColMetaUnsupported(t *testing.T) {
+	for _, dbType := range []string{"Map(String, String)", "Tuple(UInt8)", "Nothing"} {
+		if _, err := parseColMeta(dbType); err == nil {
+			t.Errorf("parseColMeta(%q) should return an error", dbType)
+		}
+	}
+}

@@ -376,7 +376,8 @@ func clickhouse_query_array(query *C.zend_string, params *C.zval) unsafe.Pointer
 	for i, ct := range colTypes {
 		m, err := parseColMeta(ct.DatabaseTypeName())
 		if err != nil {
-			return newResultArray(0)
+			setLastError(fmt.Sprintf("column %q: %s", cols[i], err))
+			return nil
 		}
 		metas[i] = m
 		dests[i] = allocScanDest(m)
@@ -404,13 +405,22 @@ func clickhouse_query_array(query *C.zend_string, params *C.zval) unsafe.Pointer
 			}
 		}
 		if err := rows.Scan(dests...); err != nil {
-			return result
+			freeResultArray(result)
+			setLastError("scan failed: " + err.Error())
+			return nil
 		}
 		sbuf = sbuf[:0]
 		for i, m := range metas {
 			packCol(i, m, dests[i], types, soff, slen, ivals, uvals, fvals, &sbuf)
 		}
 		addGenericRow(result, keys, types, sbuf, soff, slen, ivals, uvals, fvals, n)
+	}
+	// A mid-stream failure (network cut, server error) ends the Next() loop
+	// without error on Scan — surface it instead of returning truncated rows.
+	if err := rows.Err(); err != nil {
+		freeResultArray(result)
+		setLastError("query interrupted: " + err.Error())
+		return nil
 	}
 
 	return result

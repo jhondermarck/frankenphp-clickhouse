@@ -48,6 +48,12 @@ static zend_string* ch_intern_key(const char* name, size_t len) {
     return zend_string_init_interned(name, len, 1);
 }
 
+// Frees a result array abandoned mid-build after an error, so the
+// exported function can return NULL (→ RuntimeException) without leaking.
+static void ch_free_array(zend_array* arr) {
+    zend_array_destroy(arr);
+}
+
 static zend_array* ch_new_array(uint32_t cap) {
     return zend_new_array(cap);
 }
@@ -123,6 +129,12 @@ func newResultArray(cap uint32) unsafe.Pointer {
 
 func internKey(name string) *C.zend_string {
 	return C.ch_intern_key(safeCStr(name), C.size_t(len(name)))
+}
+
+// freeResultArray releases a partially built result array before an
+// error return, so it doesn't leak when the function returns nil.
+func freeResultArray(arr unsafe.Pointer) {
+	C.ch_free_array((*C.zend_array)(arr))
 }
 
 var _emptySbuf = [1]byte{0}

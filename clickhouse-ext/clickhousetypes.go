@@ -43,12 +43,19 @@ type colMeta struct {
 func parseColMeta(dbType string) (colMeta, error) {
 	raw := dbType
 	nullable := false
-	if strings.HasPrefix(raw, "Nullable(") {
-		nullable = true
-		raw = raw[len("Nullable(") : len(raw)-1]
-	}
-	if strings.HasPrefix(raw, "LowCardinality(") {
-		raw = raw[len("LowCardinality(") : len(raw)-1]
+	// LowCardinality and Nullable wrap in either order —
+	// LowCardinality(Nullable(String)) is the common nesting.
+strip:
+	for {
+		switch {
+		case strings.HasPrefix(raw, "Nullable(") && strings.HasSuffix(raw, ")"):
+			nullable = true
+			raw = raw[len("Nullable(") : len(raw)-1]
+		case strings.HasPrefix(raw, "LowCardinality(") && strings.HasSuffix(raw, ")"):
+			raw = raw[len("LowCardinality(") : len(raw)-1]
+		default:
+			break strip
+		}
 	}
 	if strings.HasPrefix(raw, "Array(") {
 		innerType := raw[len("Array(") : len(raw)-1]
@@ -63,6 +70,12 @@ func parseColMeta(dbType string) (colMeta, error) {
 	}
 	if strings.HasPrefix(raw, "Enum8") || strings.HasPrefix(raw, "Enum16") {
 		raw = "String" // driver returns enum name as string
+	}
+	if strings.HasPrefix(raw, "FixedString(") {
+		raw = "FixedString" // parameterized: FixedString(16)
+	}
+	if strings.HasPrefix(raw, "DateTime(") {
+		raw = "DateTime" // timezone param: DateTime('UTC')
 	}
 	if strings.HasPrefix(raw, "Decimal") {
 		raw = "Decimal"
