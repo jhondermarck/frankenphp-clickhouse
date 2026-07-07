@@ -30,10 +30,42 @@ const poolSize = 4
 var (
 	connPool    chan clickhouse.Conn
 	connDSN     string
+	connTimeout time.Duration // per-call timeout from the DSN (0 = none)
 	poolMu      sync.Mutex
 	lastError   string
 	lastErrorMu sync.Mutex
 )
+
+// callCtx returns the context for one ClickHouse call, honouring the
+// `timeout` DSN parameter — without it a hung query blocks a PHP
+// worker thread forever.
+func callCtx() (context.Context, context.CancelFunc) {
+	poolMu.Lock()
+	d := connTimeout
+	poolMu.Unlock()
+	if d > 0 {
+		return context.WithTimeout(context.Background(), d)
+	}
+	return context.Background(), func() {}
+}
+
+// validIdent accepts plain or database-qualified identifiers
+// ([A-Za-z0-9_.]) — insert concatenates table and column names into
+// SQL, so anything else is rejected rather than escaped.
+func validIdent(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_', c == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // acquireConn gets a connection from the pool, creating one on demand if needed.
 func acquireConn() (clickhouse.Conn, error) {
@@ -92,6 +124,10 @@ func clickhouse_get_last_error() unsafe.Pointer {
 //export clickhouse_connect
 func clickhouse_connect(dsn *C.zend_string) unsafe.Pointer {
 	dsnURL := frankenphp.GoString(unsafe.Pointer(dsn))
+	timeout, err := parseDSNTimeout(dsnURL)
+	if err != nil {
+		return frankenphp.PHPString("ERROR: "+err.Error(), false)
+	}
 	client, err := connectClickHouse(dsnURL)
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
@@ -112,9 +148,28 @@ func clickhouse_connect(dsn *C.zend_string) unsafe.Pointer {
 	connPool = make(chan clickhouse.Conn, poolSize)
 	connPool <- client
 	connDSN = dsnURL
+	connTimeout = timeout
 	poolMu.Unlock()
 
 	return frankenphp.PHPString("Ok", false)
+}
+
+// parseDSNTimeout extracts the optional `timeout` DSN parameter
+// (a Go duration, e.g. 30s). Zero means no per-call timeout.
+func parseDSNTimeout(dsn string) (time.Duration, error) {
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		return 0, fmt.Errorf("invalid DSN: %w", err)
+	}
+	v := parsed.Query().Get("timeout")
+	if v == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("invalid timeout %q (use a Go duration, e.g. 30s)", v)
+	}
+	return d, nil
 }
 
 //export clickhouse_disconnect
@@ -127,6 +182,7 @@ func clickhouse_disconnect() unsafe.Pointer {
 	pool := connPool
 	connPool = nil
 	connDSN = ""
+	connTimeout = 0
 	poolMu.Unlock()
 
 	close(pool)
@@ -144,6 +200,9 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval) un
 	}
 	defer releaseConn(client)
 	tableName := frankenphp.GoString(unsafe.Pointer(table))
+	if !validIdent(tableName) {
+		return frankenphp.PHPString(fmt.Sprintf("Insert error: invalid table name %q", tableName), false)
+	}
 
 	// Parse columns (optional — may be nil or empty)
 	var colNames []string
@@ -245,13 +304,20 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval) un
 		}
 	}
 
-	// Build INSERT statement with column list
+	// Build INSERT statement with column list — column names are
+	// concatenated into SQL, so validate them like the table name.
 	insertSQL := "INSERT INTO " + tableName
 	if len(colNames) > 0 {
+		for _, col := range colNames {
+			if !validIdent(col) {
+				return frankenphp.PHPString(fmt.Sprintf("Insert error: invalid column name %q", col), false)
+			}
+		}
 		insertSQL += " (" + strings.Join(colNames, ", ") + ")"
 	}
 
-	ctx := context.Background()
+	ctx, cancel := callCtx()
+	defer cancel()
 	batch, err := client.PrepareBatch(ctx, insertSQL)
 	if err != nil {
 		return frankenphp.PHPString("Send error: "+err.Error(), false)
@@ -330,7 +396,9 @@ func clickhouse_exec(query *C.zend_string, params *C.zval) unsafe.Pointer {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
 
-	err = client.Exec(context.Background(), queryStr, args...)
+	ctx, cancel := callCtx()
+	defer cancel()
+	err = client.Exec(ctx, queryStr, args...)
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
@@ -353,7 +421,9 @@ func clickhouse_query_array(query *C.zend_string, params *C.zval) unsafe.Pointer
 		return nil
 	}
 
-	rows, qerr := client.Query(context.Background(), queryStr, args...)
+	ctx, cancel := callCtx()
+	defer cancel()
+	rows, qerr := client.Query(ctx, queryStr, args...)
 	if qerr != nil {
 		releaseConn(client)
 		setLastError(qerr.Error())
@@ -384,8 +454,15 @@ func clickhouse_query_array(query *C.zend_string, params *C.zval) unsafe.Pointer
 	}
 	keys := make([]*C.zend_string, n)
 	for i, col := range cols {
-		keys[i] = internKey(col)
+		keys[i] = makeKey(col)
 	}
+	// Each row array takes its own reference on the key strings; drop
+	// ours once the result is built (or abandoned on error).
+	defer func() {
+		for _, k := range keys {
+			releaseKey(k)
+		}
+	}()
 
 	types := make([]C.uint8_t, n)
 	soff  := make([]C.uint32_t, n)
@@ -395,7 +472,9 @@ func clickhouse_query_array(query *C.zend_string, params *C.zval) unsafe.Pointer
 	fvals := make([]C.double, n)
 	sbuf  := make([]byte, 0, n*64)
 
-	result := newResultArray(160000)
+	// Start empty and let the packed hashtable grow — preallocating for a
+	// large result wastes several MB on every small query in worker mode.
+	result := newResultArray(0)
 
 	for rows.Next() {
 		// Reset nullable pointers so the driver can set them to nil for NULL

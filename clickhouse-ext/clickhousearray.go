@@ -42,10 +42,19 @@ static void ch_arr_add_null(zend_array* arr) {
     zend_hash_next_index_insert(arr, &z);
 }
 
-// ── Key interning ────────────────────────────────────────────────────────────
+// ── Column keys ──────────────────────────────────────────────────────────────
 
-static zend_string* ch_intern_key(const char* name, size_t len) {
-    return zend_string_init_interned(name, len, 1);
+// Regular (non-interned) key string: each row array addrefs it on insert,
+// and the creator drops its own reference after the result is built.
+// Interned-permanent strings would leak for the process lifetime (one per
+// distinct column alias) and mutate the shared intern table at runtime
+// from worker threads.
+static zend_string* ch_make_key(const char* name, size_t len) {
+    return zend_string_init(name, len, 0);
+}
+
+static void ch_release_key(zend_string* key) {
+    zend_string_release(key);
 }
 
 // Frees a result array abandoned mid-build after an error, so the
@@ -127,8 +136,12 @@ func newResultArray(cap uint32) unsafe.Pointer {
 	return unsafe.Pointer(C.ch_new_array(C.uint32_t(cap)))
 }
 
-func internKey(name string) *C.zend_string {
-	return C.ch_intern_key(safeCStr(name), C.size_t(len(name)))
+func makeKey(name string) *C.zend_string {
+	return C.ch_make_key(safeCStr(name), C.size_t(len(name)))
+}
+
+func releaseKey(key *C.zend_string) {
+	C.ch_release_key(key)
 }
 
 // freeResultArray releases a partially built result array before an
