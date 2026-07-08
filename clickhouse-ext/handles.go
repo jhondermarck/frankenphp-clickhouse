@@ -25,6 +25,16 @@ type rowPacker struct {
 	cols  []string
 	metas []colMeta
 	dests []interface{}
+	// Per-column scratch, allocated once and reused across every packRows
+	// call on this stream (pure Go memory — safe to keep across requests,
+	// unlike the request-scoped zend_string keys).
+	types []C.uint8_t
+	soff  []C.uint32_t
+	slen  []C.uint32_t
+	ivals []C.int64_t
+	uvals []C.uint64_t
+	fvals []C.double
+	sbuf  []byte
 }
 
 // newRowPacker parses column metadata for a result stream. A nil packer
@@ -51,7 +61,18 @@ func newRowPacker(rows driver.Rows) (*rowPacker, error) {
 			dests[i] = reflect.New(ct.ScanType()).Interface()
 		}
 	}
-	return &rowPacker{cols: cols, metas: metas, dests: dests}, nil
+	return &rowPacker{
+		cols:  cols,
+		metas: metas,
+		dests: dests,
+		types: make([]C.uint8_t, n),
+		soff:  make([]C.uint32_t, n),
+		slen:  make([]C.uint32_t, n),
+		ivals: make([]C.int64_t, n),
+		uvals: make([]C.uint64_t, n),
+		fvals: make([]C.double, n),
+		sbuf:  make([]byte, 0, n*64),
+	}, nil
 }
 
 // packRows drains up to max rows (max <= 0 → all remaining) into a fresh
@@ -71,17 +92,25 @@ func (p *rowPacker) packRows(rows driver.Rows, max int64) (unsafe.Pointer, bool,
 		}
 	}()
 
-	types := make([]C.uint8_t, n)
-	soff := make([]C.uint32_t, n)
-	slen := make([]C.uint32_t, n)
-	ivals := make([]C.int64_t, n)
-	uvals := make([]C.uint64_t, n)
-	fvals := make([]C.double, n)
-	sbuf := make([]byte, 0, n*64)
+	types, soff, slen := p.types, p.soff, p.slen
+	ivals, uvals, fvals := p.ivals, p.uvals, p.fvals
 
-	// Start empty and let the packed hashtable grow — preallocating for a
-	// large result wastes several MB on every small query in worker mode.
-	result := newResultArray(0)
+	// A bounded fetch (cursor, max > 0) will add up to max rows, so size the
+	// result up front and avoid the packed array doubling as it fills. For
+	// an unbounded query_array (max <= 0) the row count is unknown, so start
+	// empty rather than waste several MB on every small query in worker mode.
+	var result unsafe.Pointer
+	if max > 0 {
+		// Cap the hint so an outsized maxRows can't force a huge upfront
+		// allocation; beyond this the packed array just doubles as usual.
+		hint := max
+		if hint > 65536 {
+			hint = 65536
+		}
+		result = newResultArray(uint32(hint))
+	} else {
+		result = newResultArray(0)
+	}
 
 	var count int64
 	done := false
@@ -103,11 +132,11 @@ func (p *rowPacker) packRows(rows driver.Rows, max int64) (unsafe.Pointer, bool,
 			freeResultArray(result)
 			return nil, false, fmt.Errorf("scan failed: %w", err)
 		}
-		sbuf = sbuf[:0]
+		p.sbuf = p.sbuf[:0]
 		for i, m := range p.metas {
-			packCol(i, m, p.dests[i], types, soff, slen, ivals, uvals, fvals, &sbuf)
+			packCol(i, m, p.dests[i], types, soff, slen, ivals, uvals, fvals, &p.sbuf)
 		}
-		addGenericRow(result, keys, types, sbuf, soff, slen, ivals, uvals, fvals, n)
+		addGenericRow(result, keys, types, p.sbuf, soff, slen, ivals, uvals, fvals, n)
 		count++
 	}
 	// A mid-stream failure (network cut, server error) ends the Next() loop
