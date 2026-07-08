@@ -1178,6 +1178,120 @@ eq($rows[0]['four'], 4, 'previous pool survives failed TLS connect');
 eq(clickhouse_connect($dsn), 'Ok', 'reconnect with standard DSN');
 
 // =============================================================================
+// Multiple connections
+// =============================================================================
+
+suite('Multiple connections');
+
+$c2 = clickhouse_open($dsn);
+ok(is_int($c2), 'open returns int handle');
+$rows = clickhouse_query_array("SELECT 42 AS v", null, ['connection' => $c2]);
+eq($rows[0]['v'], 42, 'query on named connection');
+eq(clickhouse_ping($c2), 'Ok', 'ping named connection');
+$ver2 = clickhouse_server_version($c2);
+ok(preg_match('/^\d+\.\d+\.\d+$/', $ver2) === 1, 'server_version on named connection');
+
+$rows = clickhouse_query_array("SELECT 1 AS one");
+eq($rows[0]['one'], 1, 'default connection unaffected');
+
+$cur = clickhouse_query_cursor("SELECT number FROM numbers(5)", null, ['connection' => $c2]);
+eq(count(clickhouse_cursor_fetch($cur)), 5, 'cursor on named connection');
+clickhouse_cursor_close($cur);
+
+// Batch on a named connection, visible from the default one
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_conn_test");
+clickhouse_exec("CREATE TABLE clickhousephp_conn_test (n UInt32) ENGINE = Memory");
+$b = clickhouse_batch_begin('clickhousephp_conn_test', ['n'], ['connection' => $c2]);
+clickhouse_batch_append($b, [[7]]);
+clickhouse_batch_send($b);
+$rows = clickhouse_query_array("SELECT count() AS c FROM clickhousephp_conn_test");
+eq($rows[0]['c'], 1, 'batch via named connection visible from default');
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_conn_test");
+
+eq(clickhouse_close($c2), 'Ok', 'close named connection');
+$threw = false;
+try {
+    clickhouse_query_array("SELECT 1", null, ['connection' => $c2]);
+} catch (RuntimeException $e) {
+    $threw = true;
+}
+ok($threw, 'query on closed connection throws');
+$threw = false;
+try {
+    clickhouse_close($c2);
+} catch (RuntimeException $e) {
+    $threw = true;
+}
+ok($threw, 'double close throws');
+
+// =============================================================================
+// ClickHouse error codes in exceptions
+// =============================================================================
+
+suite('Error codes');
+
+$code = -1;
+try {
+    clickhouse_query_array("SELECT * FROM nonexistent_error_code_table");
+} catch (RuntimeException $e) {
+    $code = $e->getCode();
+}
+eq($code, 60, 'UNKNOWN_TABLE exposes ClickHouse code 60');
+
+$code = -1;
+try {
+    clickhouse_exec("SELECT WHERE FROM syntax(");
+} catch (RuntimeException $e) {
+    $code = $e->getCode();
+}
+eq($code, 62, 'SYNTAX_ERROR exposes ClickHouse code 62');
+
+$code = -1;
+try {
+    clickhouse_query_array("SELECT 1", null, ['bogus' => 1]);
+} catch (RuntimeException $e) {
+    $code = $e->getCode();
+}
+eq($code, 0, 'client-side errors keep code 0');
+
+// =============================================================================
+// Int128/256 and JSON types
+// =============================================================================
+
+suite('BigInt & JSON');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_big_test");
+clickhouse_exec("CREATE TABLE clickhousephp_big_test (
+    i128   Int128,
+    u256   UInt256,
+    ni     Nullable(Int128),
+    arr128 Array(Int128),
+    j      JSON
+) ENGINE = Memory");
+clickhouse_exec("INSERT INTO clickhousephp_big_test VALUES (
+    170141183460469231731687303715884105727,
+    115792089237316195423570985008687907853269984665640564039457584007913129639935,
+    NULL,
+    [1, -170141183460469231731687303715884105728],
+    '{\"a\": 1, \"b\": {\"c\": \"x\"}, \"arr\": [1, 2], \"f\": 1.5}'
+)");
+
+$rows = clickhouse_query_array("SELECT * FROM clickhousephp_big_test");
+$r = $rows[0];
+eq($r['i128'], '170141183460469231731687303715884105727', 'Int128 max as exact string');
+eq($r['u256'], '115792089237316195423570985008687907853269984665640564039457584007913129639935', 'UInt256 max as exact string');
+ok($r['ni'] === null, 'Nullable(Int128) NULL');
+eq($r['arr128'], ['1', '-170141183460469231731687303715884105728'], 'Array(Int128) as strings');
+
+ok(is_array($r['j']), 'JSON is a PHP array');
+eq($r['j']['a'], 1, 'JSON int leaf');
+eq($r['j']['b']['c'], 'x', 'JSON nested object');
+eq($r['j']['arr'], [1, 2], 'JSON array leaf');
+ok(abs($r['j']['f'] - 1.5) < 0.0001, 'JSON float leaf');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_big_test");
+
+// =============================================================================
 // Cleanup
 // =============================================================================
 

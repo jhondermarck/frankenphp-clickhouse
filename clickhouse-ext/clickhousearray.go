@@ -176,7 +176,9 @@ static void ch_add_row(
 */
 import "C"
 import (
+	"fmt"
 	"math"
+	"math/big"
 	"net/netip"
 	"reflect"
 	"sort"
@@ -184,6 +186,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/chcol"
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 )
@@ -434,6 +437,32 @@ func packCol(
 		s := (*(dest.(*decimal.Decimal))).String()
 		*sbuf = append(*sbuf, s...)
 		soff[i], slen[i], types[i] = off, C.uint32_t(len(s)), chStr
+	case kindBigInt:
+		// (U)Int128/256 scan into **big.Int (driver ScanType); nil = NULL.
+		p := *(dest.(**big.Int))
+		if p == nil {
+			types[i] = chNull
+			return
+		}
+		s := p.String()
+		*sbuf = append(*sbuf, s...)
+		soff[i], slen[i], types[i] = off, C.uint32_t(len(s)), chStr
+	case kindJSON:
+		// The JSON ScanType is a value type: dest is *chcol.JSON.
+		var jm map[string]any
+		switch j := dest.(type) {
+		case *chcol.JSON:
+			jm = j.NestedMap()
+		case **chcol.JSON:
+			if *j == nil {
+				types[i] = chNull
+				return
+			}
+			jm = (*j).NestedMap()
+		}
+		arr := buildAnyMap(jm)
+		uvals[i] = C.uint64_t(uintptr(arr))
+		types[i] = chArray
 	case kindArray:
 		arr := buildPHPArray(dest, m.inner)
 		uvals[i] = C.uint64_t(uintptr(arr))
@@ -744,8 +773,127 @@ func reflectScalarString(v reflect.Value, m *colMeta) string {
 		return v.Interface().(netip.Addr).String()
 	case kindDecimal:
 		return v.Interface().(decimal.Decimal).String()
+	case kindBigInt:
+		switch b := v.Interface().(type) {
+		case *big.Int:
+			return b.String()
+		case big.Int:
+			return b.String()
+		}
+		return v.String()
 	default:
 		return v.String()
+	}
+}
+
+// ── Dynamically-typed values (JSON trees) ─────────────────────────────────────
+
+// buildAnyMap converts a JSON NestedMap into a PHP associative array
+// (keys sorted for deterministic output).
+func buildAnyMap(m map[string]any) unsafe.Pointer {
+	arr := C.ch_new_array(C.uint32_t(len(m)))
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		addAnyKV((*C.zend_array)(arr), phpKey{s: k}, m[k])
+	}
+	return unsafe.Pointer(arr)
+}
+
+// addAnyKV adds one dynamically-typed value (JSON leaf or subtree)
+// under a key. Lists use sequential int keys, which PHP stores as a
+// packed indexed array.
+func addAnyKV(arr *C.zend_array, k phpKey, v any) {
+	if vt, ok := v.(chcol.Variant); ok {
+		if vt.Nil() {
+			kvAddNull(arr, k)
+			return
+		}
+		v = vt.Any()
+	}
+	switch t := v.(type) {
+	case nil:
+		kvAddNull(arr, k)
+	case string:
+		kvAddStr(arr, k, t)
+	case bool:
+		if t {
+			kvAddULong(arr, k, 1)
+		} else {
+			kvAddULong(arr, k, 0)
+		}
+	case int:
+		kvAddLong(arr, k, int64(t))
+	case int8:
+		kvAddLong(arr, k, int64(t))
+	case int16:
+		kvAddLong(arr, k, int64(t))
+	case int32:
+		kvAddLong(arr, k, int64(t))
+	case int64:
+		kvAddLong(arr, k, t)
+	case uint:
+		kvAddULong(arr, k, uint64(t))
+	case uint8:
+		kvAddULong(arr, k, uint64(t))
+	case uint16:
+		kvAddULong(arr, k, uint64(t))
+	case uint32:
+		kvAddULong(arr, k, uint64(t))
+	case uint64:
+		kvAddULong(arr, k, t)
+	case float32:
+		kvAddDouble(arr, k, float64(t))
+	case float64:
+		kvAddDouble(arr, k, t)
+	case time.Time:
+		kvAddStr(arr, k, string(appendClickHouseDateTime64(nil, t)))
+	case *big.Int:
+		kvAddStr(arr, k, t.String())
+	case decimal.Decimal:
+		kvAddStr(arr, k, t.String())
+	case uuid.UUID:
+		kvAddStr(arr, k, t.String())
+	case netip.Addr:
+		kvAddStr(arr, k, t.String())
+	case map[string]any:
+		kvAddArr(arr, k, (*C.zend_array)(buildAnyMap(t)))
+	case []any:
+		sub := C.ch_new_array(C.uint32_t(len(t)))
+		for j, e := range t {
+			addAnyKV((*C.zend_array)(sub), phpKey{isInt: true, i: int64(j)}, e)
+		}
+		kvAddArr(arr, k, (*C.zend_array)(sub))
+	default:
+		// Dynamic values arrive in many concrete shapes ([]*Variant,
+		// typed slices, nested maps…) — walk them via reflection.
+		rv := reflect.ValueOf(v)
+		switch rv.Kind() {
+		case reflect.Pointer:
+			if rv.IsNil() {
+				kvAddNull(arr, k)
+				return
+			}
+			addAnyKV(arr, k, rv.Elem().Interface())
+		case reflect.Slice, reflect.Array:
+			sub := C.ch_new_array(C.uint32_t(rv.Len()))
+			for j := 0; j < rv.Len(); j++ {
+				addAnyKV((*C.zend_array)(sub), phpKey{isInt: true, i: int64(j)}, rv.Index(j).Interface())
+			}
+			kvAddArr(arr, k, (*C.zend_array)(sub))
+		case reflect.Map:
+			sub := C.ch_new_array(C.uint32_t(rv.Len()))
+			iter := rv.MapRange()
+			for iter.Next() {
+				addAnyKV((*C.zend_array)(sub), phpKey{s: fmt.Sprintf("%v", iter.Key().Interface())}, iter.Value().Interface())
+			}
+			kvAddArr(arr, k, (*C.zend_array)(sub))
+		default:
+			kvAddStr(arr, k, fmt.Sprintf("%v", t))
+		}
 	}
 }
 

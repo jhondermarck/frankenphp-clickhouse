@@ -43,9 +43,19 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_cursor_close, 0, 1, I
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_ping, 0, 0, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, connection, IS_LONG, 1, "null")
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_server_version, 0, 0, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, connection, IS_LONG, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_open, 0, 1, IS_LONG, 0)
+	ZEND_ARG_TYPE_INFO(0, dsn, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_close, 0, 1, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO(0, connection, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_batch_begin, 0, 1, IS_LONG, 0)
@@ -94,6 +104,8 @@ ZEND_FUNCTION(clickhouse_batch_flush);
 ZEND_FUNCTION(clickhouse_batch_send);
 ZEND_FUNCTION(clickhouse_batch_abort);
 ZEND_FUNCTION(clickhouse_async_insert);
+ZEND_FUNCTION(clickhouse_open);
+ZEND_FUNCTION(clickhouse_close);
 
 static const zend_function_entry ext_functions[] = {
 	ZEND_FE(clickhouse_connect, arginfo_clickhouse_connect)
@@ -112,5 +124,7 @@ static const zend_function_entry ext_functions[] = {
 	ZEND_FE(clickhouse_batch_send, arginfo_clickhouse_batch_send)
 	ZEND_FE(clickhouse_batch_abort, arginfo_clickhouse_batch_abort)
 	ZEND_FE(clickhouse_async_insert, arginfo_clickhouse_async_insert)
+	ZEND_FE(clickhouse_open, arginfo_clickhouse_open)
+	ZEND_FE(clickhouse_close, arginfo_clickhouse_close)
 	ZEND_FE_END
 };

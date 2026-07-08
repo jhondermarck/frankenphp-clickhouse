@@ -85,6 +85,8 @@ use it for exports, ETL, or any result too large to materialize at once.
 
 ```php
 clickhouse_connect(string $dsn): string
+clickhouse_open(string $dsn): int                 // extra named connection
+clickhouse_close(int $connection): string
 clickhouse_query_array(string $query, ?array $params = null, ?array $options = null): array
 clickhouse_query_cursor(string $query, ?array $params = null, ?array $options = null): int
 clickhouse_cursor_fetch(int $cursor, int $max_rows = 10000): array
@@ -97,8 +99,8 @@ clickhouse_batch_flush(int $batch): string
 clickhouse_batch_send(int $batch): string
 clickhouse_batch_abort(int $batch): string
 clickhouse_async_insert(string $query, bool $wait = true, ?array $params = null, ?array $options = null): string
-clickhouse_ping(): string
-clickhouse_server_version(): string
+clickhouse_ping(?int $connection = null): string
+clickhouse_server_version(?int $connection = null): string
 clickhouse_disconnect(): string
 ```
 
@@ -108,6 +110,7 @@ The `$options` array accepts:
 
 | Key | Value | Effect |
 |-----|-------|--------|
+| `connection` | int | Route the call to a connection opened with `clickhouse_open()` (default: the global connection) |
 | `settings` | assoc array | ClickHouse query settings (`max_execution_time`, `max_result_rows`, `max_threads`…) |
 | `query_id` | string | Tags the query — visible in `system.query_log`, usable with `KILL QUERY WHERE query_id = '…'` |
 | `timeout` | Go duration (`"5s"`) | Per-call timeout, overrides the DSN `timeout` |
@@ -122,6 +125,21 @@ $rows = clickhouse_query_array($sql, null, [
 
 // Kill it from another connection if needed
 clickhouse_exec("KILL QUERY WHERE query_id = {id:String}", ['id' => "report-$jobId"]);
+```
+
+### Multiple connections
+
+`clickhouse_connect()` manages the default global connection. For a second
+cluster or database, open independent handles and route any call to them
+via the `connection` option:
+
+```php
+clickhouse_connect($dsnMain);                    // default connection
+$analytics = clickhouse_open($dsnAnalytics);     // second cluster
+
+$rows = clickhouse_query_array('SELECT …', null, ['connection' => $analytics]);
+clickhouse_ping($analytics);
+clickhouse_close($analytics);
 ```
 
 ### Incremental batches (unbounded-size writes)
@@ -161,7 +179,10 @@ clickhouse_async_insert("INSERT INTO events VALUES ({id:UUID}, {t:DateTime}, {ty
 clickhouse_async_insert("INSERT INTO metrics VALUES (now(), 1)", false);
 ```
 
-All functions throw `RuntimeException` on error. The exception message contains the ClickHouse error detail.
+All functions throw `RuntimeException` on error. The exception message
+contains the ClickHouse error detail, and for server-side errors
+`$e->getCode()` carries the [ClickHouse error code](https://clickhouse.com/docs/en/native-protocol/server#exception)
+(e.g. `60` = UNKNOWN_TABLE, `62` = SYNTAX_ERROR) — client-side errors keep code `0`.
 
 ### Error handling
 
@@ -246,14 +267,16 @@ clickhouse_disconnect();
 | `Bool` | `int` | `1` = true, `0` = false |
 | `UUID` | `string` | `"550e8400-e29b-..."` |
 | `IPv4`, `IPv6` | `string` | `"192.168.1.1"`, `"::1"` |
-| `Decimal(P,S)` | `string` | Preserves precision |
+| `Decimal(P,S)` | `string` | Preserves precision (incl. Decimal128/256) |
+| `Int128`, `UInt128`, `Int256`, `UInt256` | `string` | Exact value, beyond PHP int range |
+| `JSON` | `array` | Nested PHP array; dynamic leaf types mapped like their column equivalents |
 | `Enum8`, `Enum16` | `string` | Enum name (e.g. `"active"`) |
 | `Nullable(T)` | `T` or `null` | Any supported type |
 | `Array(T)` | `array` | Indexed PHP array, any inner type incl. `Array(Array(T))` and `Array(Map(K, V))` |
 | `Map(K, V)` | `array` | Keyed PHP array — `int` keys for integer `K`, `string` otherwise; keys sorted |
 | `LowCardinality(T)` | same as `T` | Transparent wrapper, incl. `LowCardinality(Nullable(T))` |
 
-Types not listed above (Tuple, JSON, Int128/256…) are not yet supported and will throw a `RuntimeException`.
+Types not listed above (Tuple, Dynamic, Variant, Geo…) are not yet supported and will throw a `RuntimeException`.
 
 ## DSN Format
 

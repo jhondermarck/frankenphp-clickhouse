@@ -11,14 +11,25 @@
 #include "clickhousephp_arginfo.h"
 #include "_cgo_export.h"
 
-// Helper: if result starts with "ERROR: ", throw RuntimeException and return 1.
+// Helper: if result starts with "ERROR: " or "ERROR[code]: ", throw
+// RuntimeException (the ClickHouse server error code becomes the
+// exception code) and return 1.
 static int ch_throw_on_error(zend_string *result) {
-    if (result && ZSTR_LEN(result) > 7 && memcmp(ZSTR_VAL(result), "ERROR: ", 7) == 0) {
-        zend_throw_exception(spl_ce_RuntimeException, ZSTR_VAL(result) + 7, 0);
-        zend_string_release(result);
-        return 1;
+    if (!result || ZSTR_LEN(result) < 7 || memcmp(ZSTR_VAL(result), "ERROR", 5) != 0) {
+        return 0;
     }
-    return 0;
+    const char *p = ZSTR_VAL(result) + 5;
+    zend_long code = 0;
+    if (*p == '[') {
+        p++;
+        while (*p >= '0' && *p <= '9') { code = code * 10 + (*p - '0'); p++; }
+        if (*p != ']') { return 0; }
+        p++;
+    }
+    if (p[0] != ':' || p[1] != ' ') { return 0; }
+    zend_throw_exception(spl_ce_RuntimeException, p + 2, code);
+    zend_string_release(result);
+    return 1;
 }
 
 PHP_MINIT_FUNCTION(clickhousephp) {
@@ -112,9 +123,10 @@ PHP_FUNCTION(clickhouse_query_array)
     ZEND_PARSE_PARAMETERS_END();
     zend_array *result = clickhouse_query_array(query, params, options);
     if (result == NULL) {
+        zend_long code = (zend_long)clickhouse_get_last_error_code();
         zend_string *err = clickhouse_get_last_error();
         const char *msg = err ? ZSTR_VAL(err) : "ClickHouse query failed";
-        zend_throw_exception(spl_ce_RuntimeException, msg, 0);
+        zend_throw_exception(spl_ce_RuntimeException, msg, code);
         if (err) { zend_string_release(err); }
         RETURN_THROWS();
     }
@@ -134,9 +146,10 @@ PHP_FUNCTION(clickhouse_query_cursor)
     ZEND_PARSE_PARAMETERS_END();
     int64_t id = clickhouse_query_cursor(query, params, options);
     if (id < 0) {
+        zend_long code = (zend_long)clickhouse_get_last_error_code();
         zend_string *err = clickhouse_get_last_error();
         const char *msg = err ? ZSTR_VAL(err) : "ClickHouse cursor open failed";
-        zend_throw_exception(spl_ce_RuntimeException, msg, 0);
+        zend_throw_exception(spl_ce_RuntimeException, msg, code);
         if (err) { zend_string_release(err); }
         RETURN_THROWS();
     }
@@ -154,9 +167,10 @@ PHP_FUNCTION(clickhouse_cursor_fetch)
     ZEND_PARSE_PARAMETERS_END();
     zend_array *result = clickhouse_cursor_fetch((int64_t)id, (int64_t)max_rows);
     if (result == NULL) {
+        zend_long code = (zend_long)clickhouse_get_last_error_code();
         zend_string *err = clickhouse_get_last_error();
         const char *msg = err ? ZSTR_VAL(err) : "ClickHouse cursor fetch failed";
-        zend_throw_exception(spl_ce_RuntimeException, msg, 0);
+        zend_throw_exception(spl_ce_RuntimeException, msg, code);
         if (err) { zend_string_release(err); }
         RETURN_THROWS();
     }
@@ -177,8 +191,13 @@ PHP_FUNCTION(clickhouse_cursor_close)
 
 PHP_FUNCTION(clickhouse_ping)
 {
-    if (zend_parse_parameters_none() == FAILURE) { RETURN_THROWS(); }
-    zend_string *result = clickhouse_ping();
+    zend_long conn_id = 0;
+    bool conn_is_null = 1;
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG_OR_NULL(conn_id, conn_is_null)
+    ZEND_PARSE_PARAMETERS_END();
+    zend_string *result = clickhouse_ping(conn_is_null ? 0 : (int64_t)conn_id);
     if (ch_throw_on_error(result)) { RETURN_THROWS(); }
     if (result) { RETURN_STR(result); }
     RETURN_EMPTY_STRING();
@@ -186,8 +205,13 @@ PHP_FUNCTION(clickhouse_ping)
 
 PHP_FUNCTION(clickhouse_server_version)
 {
-    if (zend_parse_parameters_none() == FAILURE) { RETURN_THROWS(); }
-    zend_string *result = clickhouse_server_version();
+    zend_long conn_id = 0;
+    bool conn_is_null = 1;
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG_OR_NULL(conn_id, conn_is_null)
+    ZEND_PARSE_PARAMETERS_END();
+    zend_string *result = clickhouse_server_version(conn_is_null ? 0 : (int64_t)conn_id);
     if (ch_throw_on_error(result)) { RETURN_THROWS(); }
     if (result) { RETURN_STR(result); }
     RETURN_EMPTY_STRING();
@@ -206,9 +230,10 @@ PHP_FUNCTION(clickhouse_batch_begin)
     ZEND_PARSE_PARAMETERS_END();
     int64_t id = clickhouse_batch_begin(table, columns, options);
     if (id < 0) {
+        zend_long code = (zend_long)clickhouse_get_last_error_code();
         zend_string *err = clickhouse_get_last_error();
         const char *msg = err ? ZSTR_VAL(err) : "ClickHouse batch open failed";
-        zend_throw_exception(spl_ce_RuntimeException, msg, 0);
+        zend_throw_exception(spl_ce_RuntimeException, msg, code);
         if (err) { zend_string_release(err); }
         RETURN_THROWS();
     }
@@ -279,6 +304,36 @@ PHP_FUNCTION(clickhouse_async_insert)
         Z_PARAM_ARRAY_OR_NULL(options)
     ZEND_PARSE_PARAMETERS_END();
     zend_string *result = clickhouse_async_insert(query, wait ? 1 : 0, params, options);
+    if (ch_throw_on_error(result)) { RETURN_THROWS(); }
+    if (result) { RETURN_STR(result); }
+    RETURN_EMPTY_STRING();
+}
+
+PHP_FUNCTION(clickhouse_open)
+{
+    zend_string *dsn = NULL;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(dsn)
+    ZEND_PARSE_PARAMETERS_END();
+    int64_t id = clickhouse_open(dsn);
+    if (id < 0) {
+        zend_long code = (zend_long)clickhouse_get_last_error_code();
+        zend_string *err = clickhouse_get_last_error();
+        const char *msg = err ? ZSTR_VAL(err) : "ClickHouse connection failed";
+        zend_throw_exception(spl_ce_RuntimeException, msg, code);
+        if (err) { zend_string_release(err); }
+        RETURN_THROWS();
+    }
+    RETURN_LONG((zend_long)id);
+}
+
+PHP_FUNCTION(clickhouse_close)
+{
+    zend_long id = 0;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(id)
+    ZEND_PARSE_PARAMETERS_END();
+    zend_string *result = clickhouse_close((int64_t)id);
     if (ch_throw_on_error(result)) { RETURN_THROWS(); }
     if (result) { RETURN_STR(result); }
     RETURN_EMPTY_STRING();

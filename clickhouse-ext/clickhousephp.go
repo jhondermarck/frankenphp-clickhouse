@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -37,21 +38,63 @@ var (
 	pool        clickhouse.Conn
 	connTimeout time.Duration // per-call timeout from the DSN (0 = none)
 	poolMu      sync.Mutex
-	lastError   string
-	lastErrorMu sync.Mutex
+
+	lastError     string
+	lastErrorCode int32 // ClickHouse server error code, 0 if none
+	lastErrorMu   sync.Mutex
 )
 
-// callCtx returns the context for one ClickHouse call, honouring the
-// `timeout` DSN parameter — without it a hung query blocks a PHP
-// worker thread forever.
-func callCtx() (context.Context, context.CancelFunc) {
-	poolMu.Lock()
-	d := connTimeout
-	poolMu.Unlock()
-	if d > 0 {
-		return context.WithTimeout(context.Background(), d)
+// ── Extra named connections (clickhouse_open / clickhouse_close) ──────────────
+
+type extraConn struct {
+	conn    clickhouse.Conn
+	timeout time.Duration
+}
+
+var (
+	connsMu sync.Mutex
+	conns   = map[int64]*extraConn{}
+	connSeq int64
+)
+
+// resolveConn returns the connection for an optional handle (<= 0 →
+// the default connection) plus its DSN-level timeout.
+func resolveConn(id int64) (clickhouse.Conn, time.Duration, error) {
+	if id <= 0 {
+		poolMu.Lock()
+		defer poolMu.Unlock()
+		if pool == nil {
+			return nil, 0, fmt.Errorf("Client not connected")
+		}
+		return pool, connTimeout, nil
 	}
-	return context.Background(), func() {}
+	connsMu.Lock()
+	defer connsMu.Unlock()
+	ec, ok := conns[id]
+	if !ok {
+		return nil, 0, fmt.Errorf("unknown connection %d", id)
+	}
+	return ec.conn, ec.timeout, nil
+}
+
+// chErrorCode extracts the ClickHouse server error code, 0 if the
+// error isn't a server exception.
+func chErrorCode(err error) int32 {
+	var ex *clickhouse.Exception
+	if errors.As(err, &ex) {
+		return ex.Code
+	}
+	return 0
+}
+
+// chError renders a driver error through the ERROR string protocol; a
+// server error code is encoded as ERROR[code]: and surfaces as the
+// RuntimeException code in the C bridge.
+func chError(prefix string, err error) unsafe.Pointer {
+	if code := chErrorCode(err); code != 0 {
+		return frankenphp.PHPString(fmt.Sprintf("ERROR[%d]: %s%s", code, prefix, err.Error()), false)
+	}
+	return frankenphp.PHPString("ERROR: "+prefix+err.Error(), false)
 }
 
 // phpAssoc unwraps a PHP associative array GoValue into a Go map
@@ -67,56 +110,61 @@ func phpAssoc(v any) (map[string]any, bool) {
 	}
 }
 
-// buildCallCtx returns the context for one call, applying the optional
-// per-call options array:
-//   - settings: map of ClickHouse query settings (max_execution_time…)
-//   - query_id: tag the query for system.query_log / KILL QUERY
-//   - timeout:  Go duration overriding the DSN-level timeout
-func buildCallCtx(options *C.zval) (context.Context, context.CancelFunc, error) {
+// callSetup resolves the target connection and builds the context for
+// one call from the optional options array:
+//   - connection: handle from clickhouse_open() (default: the global one)
+//   - settings:   map of ClickHouse query settings (max_execution_time…)
+//   - query_id:   tag the query for system.query_log / KILL QUERY
+//   - timeout:    Go duration overriding the connection's DSN timeout
+func callSetup(options *C.zval) (clickhouse.Conn, context.Context, context.CancelFunc, error) {
 	noop := func() {}
 
 	var optMap map[string]any
 	if options != nil {
 		optAny, err := frankenphp.GoValue[any](unsafe.Pointer(options))
 		if err != nil {
-			return nil, noop, fmt.Errorf("options: %s", err)
+			return nil, nil, noop, fmt.Errorf("options: %s", err)
 		}
 		if optAny != nil {
 			if m, ok := phpAssoc(optAny); ok {
 				optMap = m
 			} else if s, isSlice := optAny.([]any); !isSlice || len(s) != 0 {
-				return nil, noop, fmt.Errorf("options must be an associative array")
+				return nil, nil, noop, fmt.Errorf("options must be an associative array")
 			}
 		}
 	}
 
-	poolMu.Lock()
-	timeout := connTimeout
-	poolMu.Unlock()
-
+	connID := int64(0)
+	timeoutOverride := time.Duration(-1)
 	var chOpts []clickhouse.QueryOption
 	for k, v := range optMap {
 		switch k {
+		case "connection":
+			n, ok := v.(int64)
+			if !ok {
+				return nil, nil, noop, fmt.Errorf("options.connection must be a handle from clickhouse_open()")
+			}
+			connID = n
 		case "timeout":
 			s, ok := v.(string)
 			if !ok {
-				return nil, noop, fmt.Errorf("options.timeout must be a duration string (e.g. \"30s\")")
+				return nil, nil, noop, fmt.Errorf("options.timeout must be a duration string (e.g. \"30s\")")
 			}
 			d, err := time.ParseDuration(s)
 			if err != nil || d < 0 {
-				return nil, noop, fmt.Errorf("invalid options.timeout %q (use a Go duration, e.g. 30s)", s)
+				return nil, nil, noop, fmt.Errorf("invalid options.timeout %q (use a Go duration, e.g. 30s)", s)
 			}
-			timeout = d
+			timeoutOverride = d
 		case "query_id":
 			s, ok := v.(string)
 			if !ok || s == "" {
-				return nil, noop, fmt.Errorf("options.query_id must be a non-empty string")
+				return nil, nil, noop, fmt.Errorf("options.query_id must be a non-empty string")
 			}
 			chOpts = append(chOpts, clickhouse.WithQueryID(s))
 		case "settings":
 			sm, ok := phpAssoc(v)
 			if !ok {
-				return nil, noop, fmt.Errorf("options.settings must be an associative array")
+				return nil, nil, noop, fmt.Errorf("options.settings must be an associative array")
 			}
 			settings := clickhouse.Settings{}
 			for sk, sv := range sm {
@@ -124,8 +172,16 @@ func buildCallCtx(options *C.zval) (context.Context, context.CancelFunc, error) 
 			}
 			chOpts = append(chOpts, clickhouse.WithSettings(settings))
 		default:
-			return nil, noop, fmt.Errorf("unknown option %q (supported: settings, query_id, timeout)", k)
+			return nil, nil, noop, fmt.Errorf("unknown option %q (supported: connection, settings, query_id, timeout)", k)
 		}
+	}
+
+	conn, timeout, err := resolveConn(connID)
+	if err != nil {
+		return nil, nil, noop, err
+	}
+	if timeoutOverride >= 0 {
+		timeout = timeoutOverride
 	}
 
 	ctx := context.Background()
@@ -136,7 +192,7 @@ func buildCallCtx(options *C.zval) (context.Context, context.CancelFunc, error) 
 	if len(chOpts) > 0 {
 		ctx = clickhouse.Context(ctx, chOpts...)
 	}
-	return ctx, cancel, nil
+	return conn, ctx, cancel, nil
 }
 
 // validIdent accepts plain or database-qualified identifiers
@@ -157,21 +213,50 @@ func validIdent(name string) bool {
 	return true
 }
 
-// getConn snapshots the driver pool; per-query connection checkout is
-// handled inside the driver.
-func getConn() (clickhouse.Conn, error) {
-	poolMu.Lock()
-	defer poolMu.Unlock()
-	if pool == nil {
-		return nil, fmt.Errorf("Client not connected")
+// ── Panic guards ──────────────────────────────────────────────────────────────
+// A Go panic in an exported function would kill the whole FrankenPHP
+// process; these convert it into a RuntimeException instead.
+
+func phpPanicGuard(ret *unsafe.Pointer) {
+	if r := recover(); r != nil {
+		*ret = frankenphp.PHPString(fmt.Sprintf("ERROR: internal panic: %v", r), false)
 	}
-	return pool, nil
+}
+
+func nullPanicGuard(ret *unsafe.Pointer) {
+	if r := recover(); r != nil {
+		setLastError(fmt.Sprintf("internal panic: %v", r))
+		*ret = nil
+	}
+}
+
+func idPanicGuard(ret *C.int64_t) {
+	if r := recover(); r != nil {
+		setLastError(fmt.Sprintf("internal panic: %v", r))
+		*ret = -1
+	}
 }
 
 func setLastError(msg string) {
 	lastErrorMu.Lock()
 	lastError = msg
+	lastErrorCode = 0
 	lastErrorMu.Unlock()
+}
+
+// setChError records a driver error with its ClickHouse server code.
+func setChError(prefix string, err error) {
+	lastErrorMu.Lock()
+	lastError = prefix + err.Error()
+	lastErrorCode = chErrorCode(err)
+	lastErrorMu.Unlock()
+}
+
+//export clickhouse_get_last_error_code
+func clickhouse_get_last_error_code() C.int64_t {
+	lastErrorMu.Lock()
+	defer lastErrorMu.Unlock()
+	return C.int64_t(lastErrorCode)
 }
 
 //export clickhouse_get_last_error
@@ -179,6 +264,7 @@ func clickhouse_get_last_error() unsafe.Pointer {
 	lastErrorMu.Lock()
 	err := lastError
 	lastError = ""
+	lastErrorCode = 0
 	lastErrorMu.Unlock()
 	if err == "" {
 		return nil
@@ -187,7 +273,8 @@ func clickhouse_get_last_error() unsafe.Pointer {
 }
 
 //export clickhouse_connect
-func clickhouse_connect(dsn *C.zend_string) unsafe.Pointer {
+func clickhouse_connect(dsn *C.zend_string) (ret unsafe.Pointer) {
+	defer phpPanicGuard(&ret)
 	dsnURL := frankenphp.GoString(unsafe.Pointer(dsn))
 	conn, timeout, err := connectClickHouse(dsnURL)
 	if err != nil {
@@ -208,7 +295,8 @@ func clickhouse_connect(dsn *C.zend_string) unsafe.Pointer {
 }
 
 //export clickhouse_disconnect
-func clickhouse_disconnect() unsafe.Pointer {
+func clickhouse_disconnect() (ret unsafe.Pointer) {
+	defer phpPanicGuard(&ret)
 	poolMu.Lock()
 	old := pool
 	pool = nil
@@ -360,11 +448,13 @@ func appendRows(batch driver.Batch, rows [][]any, stride int) error {
 }
 
 //export clickhouse_insert
-func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval, options *C.zval) unsafe.Pointer {
-	client, err := getConn()
+func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval, options *C.zval) (ret unsafe.Pointer) {
+	defer phpPanicGuard(&ret)
+	client, ctx, cancel, err := callSetup(options)
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
+	defer cancel()
 	tableName := frankenphp.GoString(unsafe.Pointer(table))
 
 	colNames, err := parseColumnNames(columns)
@@ -383,22 +473,17 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval, op
 		return frankenphp.PHPString("Insert error: "+err.Error(), false)
 	}
 
-	ctx, cancel, err := buildCallCtx(options)
-	if err != nil {
-		return frankenphp.PHPString("Insert error: "+err.Error(), false)
-	}
-	defer cancel()
 	batch, err := client.PrepareBatch(ctx, insertSQL)
 	if err != nil {
-		return frankenphp.PHPString("Send error: "+err.Error(), false)
+		return chError("insert prepare: ", err)
 	}
 	defer batch.Close()
 
 	if err := appendRows(batch, rows, len(colNames)); err != nil {
-		return frankenphp.PHPString("Send error: "+err.Error(), false)
+		return chError("insert ", err)
 	}
 	if err := batch.Send(); err != nil {
-		return frankenphp.PHPString("Send error: "+err.Error(), false)
+		return chError("insert send: ", err)
 	}
 	return frankenphp.PHPString("Ok", false)
 }
@@ -447,64 +532,98 @@ func buildQueryArgs(params *C.zval) ([]any, error) {
 }
 
 //export clickhouse_exec
-func clickhouse_exec(query *C.zend_string, params *C.zval, options *C.zval) unsafe.Pointer {
-	client, err := getConn()
+func clickhouse_exec(query *C.zend_string, params *C.zval, options *C.zval) (ret unsafe.Pointer) {
+	defer phpPanicGuard(&ret)
+	client, ctx, cancel, err := callSetup(options)
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
+	defer cancel()
 	queryStr := frankenphp.GoString(unsafe.Pointer(query))
 
 	args, err := buildQueryArgs(params)
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
-
-	ctx, cancel, err := buildCallCtx(options)
-	if err != nil {
-		return frankenphp.PHPString("ERROR: "+err.Error(), false)
-	}
-	defer cancel()
-	err = client.Exec(ctx, queryStr, args...)
-	if err != nil {
-		return frankenphp.PHPString("ERROR: "+err.Error(), false)
+	if err := client.Exec(ctx, queryStr, args...); err != nil {
+		return chError("", err)
 	}
 	return frankenphp.PHPString("Ok", false)
 }
 
 //export clickhouse_ping
-func clickhouse_ping() unsafe.Pointer {
-	client, err := getConn()
+func clickhouse_ping(connID C.int64_t) (ret unsafe.Pointer) {
+	defer phpPanicGuard(&ret)
+	client, timeout, err := resolveConn(int64(connID))
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
-	ctx, cancel := callCtx()
+	ctx := context.Background()
+	cancel := func() {}
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+	}
 	defer cancel()
 	if err := client.Ping(ctx); err != nil {
-		return frankenphp.PHPString("ERROR: ping failed: "+err.Error(), false)
+		return chError("ping failed: ", err)
 	}
 	return frankenphp.PHPString("Ok", false)
 }
 
 //export clickhouse_server_version
-func clickhouse_server_version() unsafe.Pointer {
-	client, err := getConn()
+func clickhouse_server_version(connID C.int64_t) (ret unsafe.Pointer) {
+	defer phpPanicGuard(&ret)
+	client, _, err := resolveConn(int64(connID))
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
 	v, err := client.ServerVersion()
 	if err != nil {
-		return frankenphp.PHPString("ERROR: "+err.Error(), false)
+		return chError("", err)
 	}
 	return frankenphp.PHPString(fmt.Sprintf("%d.%d.%d", v.Version.Major, v.Version.Minor, v.Version.Patch), false)
 }
 
+//export clickhouse_open
+func clickhouse_open(dsn *C.zend_string) (ret C.int64_t) {
+	defer idPanicGuard(&ret)
+	dsnURL := frankenphp.GoString(unsafe.Pointer(dsn))
+	conn, timeout, err := connectClickHouse(dsnURL)
+	if err != nil {
+		setChError("", err)
+		return -1
+	}
+	connsMu.Lock()
+	connSeq++
+	id := connSeq
+	conns[id] = &extraConn{conn: conn, timeout: timeout}
+	connsMu.Unlock()
+	return C.int64_t(id)
+}
+
+//export clickhouse_close
+func clickhouse_close(id C.int64_t) (ret unsafe.Pointer) {
+	defer phpPanicGuard(&ret)
+	connsMu.Lock()
+	ec, ok := conns[int64(id)]
+	delete(conns, int64(id))
+	connsMu.Unlock()
+	if !ok {
+		return frankenphp.PHPString(fmt.Sprintf("ERROR: unknown connection %d", int64(id)), false)
+	}
+	ec.conn.Close()
+	return frankenphp.PHPString("Ok", false)
+}
+
 //export clickhouse_query_array
-func clickhouse_query_array(query *C.zend_string, params *C.zval, options *C.zval) unsafe.Pointer {
-	client, err := getConn()
+func clickhouse_query_array(query *C.zend_string, params *C.zval, options *C.zval) (ret unsafe.Pointer) {
+	defer nullPanicGuard(&ret)
+	client, ctx, cancel, err := callSetup(options)
 	if err != nil {
 		setLastError(err.Error())
 		return nil
 	}
+	defer cancel()
 	queryStr := frankenphp.GoString(unsafe.Pointer(query))
 
 	args, err := buildQueryArgs(params)
@@ -513,15 +632,9 @@ func clickhouse_query_array(query *C.zend_string, params *C.zval, options *C.zva
 		return nil
 	}
 
-	ctx, cancel, err := buildCallCtx(options)
-	if err != nil {
-		setLastError(err.Error())
-		return nil
-	}
-	defer cancel()
 	rows, qerr := client.Query(ctx, queryStr, args...)
 	if qerr != nil {
-		setLastError(qerr.Error())
+		setChError("", qerr)
 		return nil
 	}
 	defer func() {
@@ -538,7 +651,7 @@ func clickhouse_query_array(query *C.zend_string, params *C.zval, options *C.zva
 	}
 	result, _, err := packer.packRows(rows, 0)
 	if err != nil {
-		setLastError(err.Error())
+		setChError("", err)
 		return nil
 	}
 	return result
@@ -628,7 +741,7 @@ func (p *rowPacker) packRows(rows driver.Rows, max int64) (unsafe.Pointer, bool,
 		}
 		if err := rows.Scan(p.dests...); err != nil {
 			freeResultArray(result)
-			return nil, false, fmt.Errorf("scan failed: %s", err)
+			return nil, false, fmt.Errorf("scan failed: %w", err)
 		}
 		sbuf = sbuf[:0]
 		for i, m := range p.metas {
@@ -642,7 +755,7 @@ func (p *rowPacker) packRows(rows driver.Rows, max int64) (unsafe.Pointer, bool,
 	if done {
 		if err := rows.Err(); err != nil {
 			freeResultArray(result)
-			return nil, false, fmt.Errorf("query interrupted: %s", err)
+			return nil, false, fmt.Errorf("query interrupted: %w", err)
 		}
 	}
 	return result, done, nil
@@ -688,12 +801,8 @@ func dropBatch(id int64) {
 }
 
 //export clickhouse_batch_begin
-func clickhouse_batch_begin(table *C.zend_string, columns *C.zval, options *C.zval) C.int64_t {
-	client, err := getConn()
-	if err != nil {
-		setLastError(err.Error())
-		return -1
-	}
+func clickhouse_batch_begin(table *C.zend_string, columns *C.zval, options *C.zval) (ret C.int64_t) {
+	defer idPanicGuard(&ret)
 	tableName := frankenphp.GoString(unsafe.Pointer(table))
 
 	colNames, err := parseColumnNames(columns)
@@ -707,7 +816,7 @@ func clickhouse_batch_begin(table *C.zend_string, columns *C.zval, options *C.zv
 		return -1
 	}
 	// The context must outlive this call — it is cancelled at send/abort.
-	ctx, cancel, err := buildCallCtx(options)
+	client, ctx, cancel, err := callSetup(options)
 	if err != nil {
 		setLastError(err.Error())
 		return -1
@@ -715,7 +824,7 @@ func clickhouse_batch_begin(table *C.zend_string, columns *C.zval, options *C.zv
 	batch, err := client.PrepareBatch(ctx, insertSQL)
 	if err != nil {
 		cancel()
-		setLastError(err.Error())
+		setChError("", err)
 		return -1
 	}
 
@@ -729,7 +838,8 @@ func clickhouse_batch_begin(table *C.zend_string, columns *C.zval, options *C.zv
 }
 
 //export clickhouse_batch_append
-func clickhouse_batch_append(id C.int64_t, values *C.zval) unsafe.Pointer {
+func clickhouse_batch_append(id C.int64_t, values *C.zval) (ret unsafe.Pointer) {
+	defer phpPanicGuard(&ret)
 	b := getBatch(int64(id))
 	if b == nil {
 		return frankenphp.PHPString(fmt.Sprintf("ERROR: unknown batch %d — already sent, aborted, or never opened", int64(id)), false)
@@ -751,7 +861,8 @@ func clickhouse_batch_append(id C.int64_t, values *C.zval) unsafe.Pointer {
 }
 
 //export clickhouse_batch_flush
-func clickhouse_batch_flush(id C.int64_t) unsafe.Pointer {
+func clickhouse_batch_flush(id C.int64_t) (ret unsafe.Pointer) {
+	defer phpPanicGuard(&ret)
 	b := getBatch(int64(id))
 	if b == nil {
 		return frankenphp.PHPString(fmt.Sprintf("ERROR: unknown batch %d", int64(id)), false)
@@ -765,13 +876,14 @@ func clickhouse_batch_flush(id C.int64_t) unsafe.Pointer {
 		// A failed flush leaves the stream in an undefined state — close it.
 		b.releaseResources()
 		dropBatch(int64(id))
-		return frankenphp.PHPString("ERROR: flush: "+err.Error(), false)
+		return chError("flush: ", err)
 	}
 	return frankenphp.PHPString("Ok", false)
 }
 
 //export clickhouse_batch_send
-func clickhouse_batch_send(id C.int64_t) unsafe.Pointer {
+func clickhouse_batch_send(id C.int64_t) (ret unsafe.Pointer) {
+	defer phpPanicGuard(&ret)
 	b := getBatch(int64(id))
 	if b == nil {
 		return frankenphp.PHPString(fmt.Sprintf("ERROR: unknown batch %d", int64(id)), false)
@@ -785,13 +897,14 @@ func clickhouse_batch_send(id C.int64_t) unsafe.Pointer {
 	b.releaseResources()
 	dropBatch(int64(id))
 	if err != nil {
-		return frankenphp.PHPString("ERROR: send: "+err.Error(), false)
+		return chError("send: ", err)
 	}
 	return frankenphp.PHPString("Ok", false)
 }
 
 //export clickhouse_batch_abort
-func clickhouse_batch_abort(id C.int64_t) unsafe.Pointer {
+func clickhouse_batch_abort(id C.int64_t) (ret unsafe.Pointer) {
+	defer phpPanicGuard(&ret)
 	b := getBatch(int64(id))
 	if b == nil {
 		return frankenphp.PHPString(fmt.Sprintf("ERROR: unknown batch %d", int64(id)), false)
@@ -808,24 +921,21 @@ func clickhouse_batch_abort(id C.int64_t) unsafe.Pointer {
 }
 
 //export clickhouse_async_insert
-func clickhouse_async_insert(query *C.zend_string, wait C.int, params *C.zval, options *C.zval) unsafe.Pointer {
-	client, err := getConn()
+func clickhouse_async_insert(query *C.zend_string, wait C.int, params *C.zval, options *C.zval) (ret unsafe.Pointer) {
+	defer phpPanicGuard(&ret)
+	client, ctx, cancel, err := callSetup(options)
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
+	defer cancel()
 	queryStr := frankenphp.GoString(unsafe.Pointer(query))
 
 	args, err := buildQueryArgs(params)
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
-	ctx, cancel, err := buildCallCtx(options)
-	if err != nil {
-		return frankenphp.PHPString("ERROR: "+err.Error(), false)
-	}
-	defer cancel()
 	if err := client.AsyncInsert(ctx, queryStr, wait != 0, args...); err != nil {
-		return frankenphp.PHPString("ERROR: async insert: "+err.Error(), false)
+		return chError("async insert: ", err)
 	}
 	return frankenphp.PHPString("Ok", false)
 }
@@ -860,12 +970,8 @@ func (cur *cursorState) releaseResources() {
 }
 
 //export clickhouse_query_cursor
-func clickhouse_query_cursor(query *C.zend_string, params *C.zval, options *C.zval) C.int64_t {
-	client, err := getConn()
-	if err != nil {
-		setLastError(err.Error())
-		return -1
-	}
+func clickhouse_query_cursor(query *C.zend_string, params *C.zval, options *C.zval) (ret C.int64_t) {
+	defer idPanicGuard(&ret)
 	queryStr := frankenphp.GoString(unsafe.Pointer(query))
 
 	args, err := buildQueryArgs(params)
@@ -876,7 +982,7 @@ func clickhouse_query_cursor(query *C.zend_string, params *C.zval, options *C.zv
 
 	// The context must outlive this call — it is cancelled when the
 	// cursor is exhausted or closed.
-	ctx, cancel, err := buildCallCtx(options)
+	client, ctx, cancel, err := callSetup(options)
 	if err != nil {
 		setLastError(err.Error())
 		return -1
@@ -884,7 +990,7 @@ func clickhouse_query_cursor(query *C.zend_string, params *C.zval, options *C.zv
 	rows, err := client.Query(ctx, queryStr, args...)
 	if err != nil {
 		cancel()
-		setLastError(err.Error())
+		setChError("", err)
 		return -1
 	}
 	packer, err := newRowPacker(rows)
@@ -908,7 +1014,8 @@ func clickhouse_query_cursor(query *C.zend_string, params *C.zval, options *C.zv
 }
 
 //export clickhouse_cursor_fetch
-func clickhouse_cursor_fetch(id C.int64_t, maxRows C.int64_t) unsafe.Pointer {
+func clickhouse_cursor_fetch(id C.int64_t, maxRows C.int64_t) (ret unsafe.Pointer) {
+	defer nullPanicGuard(&ret)
 	cursorsMu.Lock()
 	cur, ok := cursors[int64(id)]
 	cursorsMu.Unlock()
@@ -929,7 +1036,7 @@ func clickhouse_cursor_fetch(id C.int64_t, maxRows C.int64_t) unsafe.Pointer {
 		cursorsMu.Lock()
 		delete(cursors, int64(id))
 		cursorsMu.Unlock()
-		setLastError(err.Error())
+		setChError("", err)
 		return nil
 	}
 	if done {
@@ -941,7 +1048,8 @@ func clickhouse_cursor_fetch(id C.int64_t, maxRows C.int64_t) unsafe.Pointer {
 }
 
 //export clickhouse_cursor_close
-func clickhouse_cursor_close(id C.int64_t) unsafe.Pointer {
+func clickhouse_cursor_close(id C.int64_t) (ret unsafe.Pointer) {
+	defer phpPanicGuard(&ret)
 	cursorsMu.Lock()
 	cur, ok := cursors[int64(id)]
 	delete(cursors, int64(id))

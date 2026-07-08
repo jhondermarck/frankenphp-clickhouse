@@ -2,6 +2,7 @@ package clickhousephp
 
 import (
 	"fmt"
+	"math/big"
 	"net/netip"
 	"strings"
 	"time"
@@ -31,6 +32,8 @@ const (
 	kindIPv4
 	kindIPv6
 	kindDecimal
+	kindBigInt
+	kindJSON
 	kindArray
 	kindMap
 )
@@ -117,6 +120,9 @@ strip:
 	if strings.HasPrefix(raw, "Decimal") {
 		raw = "Decimal"
 	}
+	if strings.HasPrefix(raw, "JSON(") {
+		raw = "JSON" // parameterized: JSON(max_dynamic_paths=…)
+	}
 	var k colKind
 	switch raw {
 	case "String", "FixedString":
@@ -153,6 +159,10 @@ strip:
 		k = kindIPv6
 	case "Decimal":
 		k = kindDecimal
+	case "Int128", "UInt128", "Int256", "UInt256":
+		k = kindBigInt
+	case "JSON":
+		k = kindJSON
 	default:
 		return colMeta{}, fmt.Errorf("unsupported type: %s", dbType)
 	}
@@ -329,6 +339,10 @@ func allocArrayScanDest(inner *colMeta) interface{} {
 // the pointer when scanning NULL after a non-NULL row.
 func resetNullableDest(k colKind, dest interface{}) {
 	switch k {
+	case kindBigInt:
+		if pp, ok := dest.(**big.Int); ok {
+			*pp = nil
+		}
 	case kindString:
 		*(dest.(*(*string))) = nil
 	case kindDateTime:
