@@ -1,6 +1,7 @@
 package clickhousephp
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -219,4 +220,59 @@ func TestReapIdleHandles(t *testing.T) {
 	if !freshThere {
 		t.Error("fresh cursor was wrongly reaped")
 	}
+}
+
+// TestRegistryConcurrency hammers the cursor/batch registries and the reaper
+// from many goroutines to shake out data races under -race.
+func TestRegistryConcurrency(t *testing.T) {
+	var writers, reaper sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Reaper sweeping continuously (separate WaitGroup: it only exits after
+	// the writers are done and stop is closed).
+	reaper.Add(1)
+	go func() {
+		defer reaper.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				reapIdleHandles(time.Now())
+			}
+		}
+	}()
+
+	// Writers registering and dropping cursors + batches concurrently.
+	for g := 0; g < 8; g++ {
+		writers.Add(1)
+		go func(base int64) {
+			defer writers.Done()
+			for i := int64(0); i < 1000; i++ {
+				id := base*100000 + i
+				cur := &cursorState{rows: &fakeRows{}, cancel: func() {}, lastUsed: time.Now()}
+				cursorsMu.Lock()
+				cursors[id] = cur
+				cursorsMu.Unlock()
+
+				b := &batchState{cancel: func() {}, lastUsed: time.Now(), done: true}
+				batchesMu.Lock()
+				batches[id] = b
+				batchesMu.Unlock()
+
+				cur.mu.Lock()
+				cur.releaseResources()
+				cur.mu.Unlock()
+				cursorsMu.Lock()
+				delete(cursors, id)
+				cursorsMu.Unlock()
+				batchesMu.Lock()
+				delete(batches, id)
+				batchesMu.Unlock()
+			}
+		}(int64(g))
+	}
+	writers.Wait()
+	close(stop)
+	reaper.Wait()
 }
