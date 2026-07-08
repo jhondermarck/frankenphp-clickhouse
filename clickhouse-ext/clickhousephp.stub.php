@@ -10,14 +10,18 @@ function clickhouse_connect(string $dsn): string {}
 
 function clickhouse_disconnect(): string {}
 
-function clickhouse_insert(string $table, array $values, ?array $columns = null): string {}
+function clickhouse_insert(string $table, array $values, ?array $columns = null, ?array $options = null): string {}
 
-function clickhouse_exec(string $query, ?array $params = null): string {}
+function clickhouse_exec(string $query, ?array $params = null, ?array $options = null): string {}
 
-function clickhouse_query_array(string $query, ?array $params = null): array {}
+function clickhouse_query_array(string $query, ?array $params = null, ?array $options = null): array {}
 
-function clickhouse_query_cursor(string $query, ?array $params = null): int {}
+function clickhouse_query_cursor(string $query, ?array $params = null, ?array $options = null): int {}
 
 function clickhouse_cursor_fetch(int $cursor, int $max_rows = 10000): array {}
 
 function clickhouse_cursor_close(int $cursor): string {}
+
+function clickhouse_ping(): string {}
+
+function clickhouse_server_version(): string {}

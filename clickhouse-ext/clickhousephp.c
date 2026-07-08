@@ -59,13 +59,15 @@ PHP_FUNCTION(clickhouse_insert)
     zend_string *table = NULL;
     zval *values = NULL;
     zval *columns = NULL;
-    ZEND_PARSE_PARAMETERS_START(2, 3)
+    zval *options = NULL;
+    ZEND_PARSE_PARAMETERS_START(2, 4)
         Z_PARAM_STR(table)
         Z_PARAM_ARRAY(values)
         Z_PARAM_OPTIONAL
         Z_PARAM_ARRAY_OR_NULL(columns)
+        Z_PARAM_ARRAY_OR_NULL(options)
     ZEND_PARSE_PARAMETERS_END();
-    zend_string *result = clickhouse_insert(table, values, columns);
+    zend_string *result = clickhouse_insert(table, values, columns, options);
     if (ch_throw_on_error(result)) { RETURN_THROWS(); }
     // Also catch "Insert error" and "Send error" prefixes from Go
     if (result && (
@@ -84,12 +86,14 @@ PHP_FUNCTION(clickhouse_exec)
 {
     zend_string *query = NULL;
     zval *params = NULL;
-    ZEND_PARSE_PARAMETERS_START(1, 2)
+    zval *options = NULL;
+    ZEND_PARSE_PARAMETERS_START(1, 3)
         Z_PARAM_STR(query)
         Z_PARAM_OPTIONAL
         Z_PARAM_ARRAY_OR_NULL(params)
+        Z_PARAM_ARRAY_OR_NULL(options)
     ZEND_PARSE_PARAMETERS_END();
-    zend_string *result = clickhouse_exec(query, params);
+    zend_string *result = clickhouse_exec(query, params, options);
     if (ch_throw_on_error(result)) { RETURN_THROWS(); }
     if (result) { RETURN_STR(result); }
     RETURN_EMPTY_STRING();
@@ -99,12 +103,14 @@ PHP_FUNCTION(clickhouse_query_array)
 {
     zend_string *query = NULL;
     zval *params = NULL;
-    ZEND_PARSE_PARAMETERS_START(1, 2)
+    zval *options = NULL;
+    ZEND_PARSE_PARAMETERS_START(1, 3)
         Z_PARAM_STR(query)
         Z_PARAM_OPTIONAL
         Z_PARAM_ARRAY_OR_NULL(params)
+        Z_PARAM_ARRAY_OR_NULL(options)
     ZEND_PARSE_PARAMETERS_END();
-    zend_array *result = clickhouse_query_array(query, params);
+    zend_array *result = clickhouse_query_array(query, params, options);
     if (result == NULL) {
         zend_string *err = clickhouse_get_last_error();
         const char *msg = err ? ZSTR_VAL(err) : "ClickHouse query failed";
@@ -119,12 +125,14 @@ PHP_FUNCTION(clickhouse_query_cursor)
 {
     zend_string *query = NULL;
     zval *params = NULL;
-    ZEND_PARSE_PARAMETERS_START(1, 2)
+    zval *options = NULL;
+    ZEND_PARSE_PARAMETERS_START(1, 3)
         Z_PARAM_STR(query)
         Z_PARAM_OPTIONAL
         Z_PARAM_ARRAY_OR_NULL(params)
+        Z_PARAM_ARRAY_OR_NULL(options)
     ZEND_PARSE_PARAMETERS_END();
-    int64_t id = clickhouse_query_cursor(query, params);
+    int64_t id = clickhouse_query_cursor(query, params, options);
     if (id < 0) {
         zend_string *err = clickhouse_get_last_error();
         const char *msg = err ? ZSTR_VAL(err) : "ClickHouse cursor open failed";
@@ -162,6 +170,24 @@ PHP_FUNCTION(clickhouse_cursor_close)
         Z_PARAM_LONG(id)
     ZEND_PARSE_PARAMETERS_END();
     zend_string *result = clickhouse_cursor_close((int64_t)id);
+    if (ch_throw_on_error(result)) { RETURN_THROWS(); }
+    if (result) { RETURN_STR(result); }
+    RETURN_EMPTY_STRING();
+}
+
+PHP_FUNCTION(clickhouse_ping)
+{
+    if (zend_parse_parameters_none() == FAILURE) { RETURN_THROWS(); }
+    zend_string *result = clickhouse_ping();
+    if (ch_throw_on_error(result)) { RETURN_THROWS(); }
+    if (result) { RETURN_STR(result); }
+    RETURN_EMPTY_STRING();
+}
+
+PHP_FUNCTION(clickhouse_server_version)
+{
+    if (zend_parse_parameters_none() == FAILURE) { RETURN_THROWS(); }
+    zend_string *result = clickhouse_server_version();
     if (ch_throw_on_error(result)) { RETURN_THROWS(); }
     if (result) { RETURN_STR(result); }
     RETURN_EMPTY_STRING();

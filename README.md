@@ -85,13 +85,37 @@ use it for exports, ETL, or any result too large to materialize at once.
 
 ```php
 clickhouse_connect(string $dsn): string
-clickhouse_query_array(string $query, ?array $params = null): array
-clickhouse_query_cursor(string $query, ?array $params = null): int
+clickhouse_query_array(string $query, ?array $params = null, ?array $options = null): array
+clickhouse_query_cursor(string $query, ?array $params = null, ?array $options = null): int
 clickhouse_cursor_fetch(int $cursor, int $max_rows = 10000): array
 clickhouse_cursor_close(int $cursor): string
-clickhouse_exec(string $query, ?array $params = null): string
-clickhouse_insert(string $table, array $values, ?array $columns = null): string
+clickhouse_exec(string $query, ?array $params = null, ?array $options = null): string
+clickhouse_insert(string $table, array $values, ?array $columns = null, ?array $options = null): string
+clickhouse_ping(): string
+clickhouse_server_version(): string
 clickhouse_disconnect(): string
+```
+
+### Per-call options
+
+The `$options` array accepts:
+
+| Key | Value | Effect |
+|-----|-------|--------|
+| `settings` | assoc array | ClickHouse query settings (`max_execution_time`, `max_result_rows`, `max_threads`…) |
+| `query_id` | string | Tags the query — visible in `system.query_log`, usable with `KILL QUERY WHERE query_id = '…'` |
+| `timeout` | Go duration (`"5s"`) | Per-call timeout, overrides the DSN `timeout` |
+
+```php
+// Cap a heavy query, tag it for observability
+$rows = clickhouse_query_array($sql, null, [
+    'settings' => ['max_execution_time' => 30, 'max_result_rows' => 1_000_000],
+    'query_id' => 'report-' . $jobId,
+    'timeout'  => '35s',
+]);
+
+// Kill it from another connection if needed
+clickhouse_exec("KILL QUERY WHERE query_id = {id:String}", ['id' => "report-$jobId"]);
 ```
 
 All functions throw `RuntimeException` on error. The exception message contains the ClickHouse error detail.

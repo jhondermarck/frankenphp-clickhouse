@@ -953,6 +953,78 @@ clickhouse_cursor_close($curD);
 clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_cursor_test");
 
 // =============================================================================
+// Per-call options, ping, server version
+// =============================================================================
+
+suite('Options, ping, server version');
+
+eq(clickhouse_ping(), 'Ok', 'ping returns Ok');
+
+$ver = clickhouse_server_version();
+ok(preg_match('/^\d+\.\d+\.\d+$/', $ver) === 1, 'server_version is X.Y.Z', $ver);
+
+// query_id propagates to the server (queryID() echoes the current query's id)
+$rows = clickhouse_query_array("SELECT queryID() AS qid", null, ['query_id' => 'franken-test-qid-123']);
+eq($rows[0]['qid'], 'franken-test-qid-123', 'query_id propagated to server');
+
+// Settings are applied — max_result_rows with overflow throw
+$threw = false;
+try {
+    clickhouse_query_array("SELECT number FROM numbers(100)", null,
+        ['settings' => ['max_result_rows' => 5, 'result_overflow_mode' => 'throw']]);
+} catch (RuntimeException $e) {
+    $threw = true;
+}
+ok($threw, 'settings enforced: max_result_rows overflow throws');
+
+$rows = clickhouse_query_array("SELECT number FROM numbers(10)", null, ['settings' => ['max_threads' => 1]]);
+eq(count($rows), 10, 'query with settings runs normally');
+
+// Per-call timeout overrides the DSN timeout
+$threw = false;
+try {
+    clickhouse_query_array("SELECT sleep(1)", null, ['timeout' => '200ms']);
+} catch (RuntimeException $e) {
+    $threw = true;
+}
+ok($threw, 'per-call timeout aborts a slow query');
+
+// Unknown option key is rejected (typo protection)
+$threw = false;
+$msg = '';
+try {
+    clickhouse_query_array("SELECT 1", null, ['bogus' => 1]);
+} catch (RuntimeException $e) {
+    $threw = true;
+    $msg = $e->getMessage();
+}
+ok($threw && str_contains($msg, 'unknown option'), 'unknown option throws', $msg);
+
+// exec and insert accept options too
+$r = clickhouse_exec("SELECT count() FROM numbers(10)", null, ['settings' => ['max_threads' => 1]]);
+eq($r, 'Ok', 'exec with settings');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_opts_test");
+clickhouse_exec("CREATE TABLE clickhousephp_opts_test (n UInt32) ENGINE = Memory");
+$r = clickhouse_insert('clickhousephp_opts_test', [1, 2, 3], ['n'], ['query_id' => 'franken-insert-qid']);
+eq($r, 'Ok', 'insert with options');
+$rows = clickhouse_query_array("SELECT count() AS c FROM clickhousephp_opts_test");
+eq($rows[0]['c'], 3, 'insert with options wrote rows');
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_opts_test");
+
+// Cursor honours settings (overflow throws at open or first fetch)
+$threw = false;
+try {
+    $cur = clickhouse_query_cursor("SELECT number FROM numbers(1000000)", null,
+        ['settings' => ['max_result_rows' => 5, 'result_overflow_mode' => 'throw']]);
+    clickhouse_cursor_fetch($cur);
+    clickhouse_cursor_close($cur);
+} catch (RuntimeException $e) {
+    $threw = true;
+}
+ok($threw, 'cursor honours per-call settings');
+
+// =============================================================================
 // Cleanup
 // =============================================================================
 
