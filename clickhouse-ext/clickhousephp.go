@@ -6,12 +6,14 @@ package clickhousephp
 */
 import "C"
 import (
-	_ "runtime/cgo"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net/url"
+	"os"
 	"reflect"
+	_ "runtime/cgo"
 	"sort"
 	"strings"
 	"sync"
@@ -27,11 +29,12 @@ func init() {
 	frankenphp.RegisterExtension(unsafe.Pointer(&C.clickhousephp_module_entry))
 }
 
-const poolSize = 4
-
+// The driver's clickhouse.Conn is itself a thread-safe connection pool
+// (max_open_conns / max_idle_conns / conn_max_lifetime are DSN params).
+// One instance serves every PHP thread; poolMu only guards the swap on
+// connect/disconnect.
 var (
-	connPool    chan clickhouse.Conn
-	connDSN     string
+	pool        clickhouse.Conn
 	connTimeout time.Duration // per-call timeout from the DSN (0 = none)
 	poolMu      sync.Mutex
 	lastError   string
@@ -154,40 +157,15 @@ func validIdent(name string) bool {
 	return true
 }
 
-// acquireConn gets a connection from the pool, creating one on demand if needed.
-func acquireConn() (clickhouse.Conn, error) {
+// getConn snapshots the driver pool; per-query connection checkout is
+// handled inside the driver.
+func getConn() (clickhouse.Conn, error) {
 	poolMu.Lock()
-	pool := connPool
-	dsn := connDSN
-	poolMu.Unlock()
-
+	defer poolMu.Unlock()
 	if pool == nil {
 		return nil, fmt.Errorf("Client not connected")
 	}
-
-	select {
-	case c := <-pool:
-		return c, nil
-	default:
-		return connectClickHouse(dsn)
-	}
-}
-
-// releaseConn returns a connection to the pool, closing it if the pool is full.
-func releaseConn(c clickhouse.Conn) {
-	poolMu.Lock()
-	pool := connPool
-	poolMu.Unlock()
-
-	if pool == nil {
-		c.Close()
-		return
-	}
-	select {
-	case pool <- c:
-	default:
-		c.Close()
-	}
+	return pool, nil
 }
 
 func setLastError(msg string) {
@@ -211,71 +189,35 @@ func clickhouse_get_last_error() unsafe.Pointer {
 //export clickhouse_connect
 func clickhouse_connect(dsn *C.zend_string) unsafe.Pointer {
 	dsnURL := frankenphp.GoString(unsafe.Pointer(dsn))
-	timeout, err := parseDSNTimeout(dsnURL)
-	if err != nil {
-		return frankenphp.PHPString("ERROR: "+err.Error(), false)
-	}
-	client, err := connectClickHouse(dsnURL)
+	conn, timeout, err := connectClickHouse(dsnURL)
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
 
 	poolMu.Lock()
-	// Close previous pool if reconnecting
-	if connPool != nil {
-		old := connPool
-		connPool = nil
-		poolMu.Unlock()
-		close(old)
-		for c := range old {
-			c.Close()
-		}
-		poolMu.Lock()
-	}
-	connPool = make(chan clickhouse.Conn, poolSize)
-	connPool <- client
-	connDSN = dsnURL
+	old := pool
+	pool = conn
 	connTimeout = timeout
 	poolMu.Unlock()
-
+	// Closing the previous pool outside the lock; its open cursors and
+	// batches fail on their next operation, same as before.
+	if old != nil {
+		old.Close()
+	}
 	return frankenphp.PHPString("Ok", false)
-}
-
-// parseDSNTimeout extracts the optional `timeout` DSN parameter
-// (a Go duration, e.g. 30s). Zero means no per-call timeout.
-func parseDSNTimeout(dsn string) (time.Duration, error) {
-	parsed, err := url.Parse(dsn)
-	if err != nil {
-		return 0, fmt.Errorf("invalid DSN: %w", err)
-	}
-	v := parsed.Query().Get("timeout")
-	if v == "" {
-		return 0, nil
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil || d < 0 {
-		return 0, fmt.Errorf("invalid timeout %q (use a Go duration, e.g. 30s)", v)
-	}
-	return d, nil
 }
 
 //export clickhouse_disconnect
 func clickhouse_disconnect() unsafe.Pointer {
 	poolMu.Lock()
-	if connPool == nil {
-		poolMu.Unlock()
-		return frankenphp.PHPString("ERROR: Client not connected", false)
-	}
-	pool := connPool
-	connPool = nil
-	connDSN = ""
+	old := pool
+	pool = nil
 	connTimeout = 0
 	poolMu.Unlock()
-
-	close(pool)
-	for c := range pool {
-		c.Close()
+	if old == nil {
+		return frankenphp.PHPString("ERROR: Client not connected", false)
 	}
+	old.Close()
 	return frankenphp.PHPString("Ok", false)
 }
 
@@ -419,11 +361,10 @@ func appendRows(batch driver.Batch, rows [][]any, stride int) error {
 
 //export clickhouse_insert
 func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval, options *C.zval) unsafe.Pointer {
-	client, err := acquireConn()
+	client, err := getConn()
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
-	defer releaseConn(client)
 	tableName := frankenphp.GoString(unsafe.Pointer(table))
 
 	colNames, err := parseColumnNames(columns)
@@ -507,11 +448,10 @@ func buildQueryArgs(params *C.zval) ([]any, error) {
 
 //export clickhouse_exec
 func clickhouse_exec(query *C.zend_string, params *C.zval, options *C.zval) unsafe.Pointer {
-	client, err := acquireConn()
+	client, err := getConn()
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
-	defer releaseConn(client)
 	queryStr := frankenphp.GoString(unsafe.Pointer(query))
 
 	args, err := buildQueryArgs(params)
@@ -533,11 +473,10 @@ func clickhouse_exec(query *C.zend_string, params *C.zval, options *C.zval) unsa
 
 //export clickhouse_ping
 func clickhouse_ping() unsafe.Pointer {
-	client, err := acquireConn()
+	client, err := getConn()
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
-	defer releaseConn(client)
 	ctx, cancel := callCtx()
 	defer cancel()
 	if err := client.Ping(ctx); err != nil {
@@ -548,11 +487,10 @@ func clickhouse_ping() unsafe.Pointer {
 
 //export clickhouse_server_version
 func clickhouse_server_version() unsafe.Pointer {
-	client, err := acquireConn()
+	client, err := getConn()
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
-	defer releaseConn(client)
 	v, err := client.ServerVersion()
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
@@ -562,7 +500,7 @@ func clickhouse_server_version() unsafe.Pointer {
 
 //export clickhouse_query_array
 func clickhouse_query_array(query *C.zend_string, params *C.zval, options *C.zval) unsafe.Pointer {
-	client, err := acquireConn()
+	client, err := getConn()
 	if err != nil {
 		setLastError(err.Error())
 		return nil
@@ -571,27 +509,23 @@ func clickhouse_query_array(query *C.zend_string, params *C.zval, options *C.zva
 
 	args, err := buildQueryArgs(params)
 	if err != nil {
-		releaseConn(client)
 		setLastError(err.Error())
 		return nil
 	}
 
 	ctx, cancel, err := buildCallCtx(options)
 	if err != nil {
-		releaseConn(client)
 		setLastError(err.Error())
 		return nil
 	}
 	defer cancel()
 	rows, qerr := client.Query(ctx, queryStr, args...)
 	if qerr != nil {
-		releaseConn(client)
 		setLastError(qerr.Error())
 		return nil
 	}
 	defer func() {
 		rows.Close()
-		releaseConn(client)
 	}()
 
 	packer, err := newRowPacker(rows)
@@ -716,11 +650,10 @@ func (p *rowPacker) packRows(rows driver.Rows, max int64) (unsafe.Pointer, bool,
 
 // ── Incremental insert batches ────────────────────────────────────────────────
 
-// batchState is one open incremental insert. The pooled connection is
-// held from begin until send or abort.
+// batchState is one open incremental insert; the driver socket is
+// returned to the driver pool at send or abort.
 type batchState struct {
 	mu     sync.Mutex
-	conn   clickhouse.Conn
 	batch  driver.Batch
 	cancel context.CancelFunc
 	cols   []string
@@ -733,15 +666,13 @@ var (
 	batchSeq  int64
 )
 
-// releaseResources returns the connection to the pool. Callers must
-// hold b.mu.
+// releaseResources cancels the batch context. Callers must hold b.mu.
 func (b *batchState) releaseResources() {
 	if b.done {
 		return
 	}
 	b.done = true
 	b.cancel()
-	releaseConn(b.conn)
 }
 
 func getBatch(id int64) *batchState {
@@ -758,7 +689,7 @@ func dropBatch(id int64) {
 
 //export clickhouse_batch_begin
 func clickhouse_batch_begin(table *C.zend_string, columns *C.zval, options *C.zval) C.int64_t {
-	client, err := acquireConn()
+	client, err := getConn()
 	if err != nil {
 		setLastError(err.Error())
 		return -1
@@ -767,32 +698,28 @@ func clickhouse_batch_begin(table *C.zend_string, columns *C.zval, options *C.zv
 
 	colNames, err := parseColumnNames(columns)
 	if err != nil {
-		releaseConn(client)
 		setLastError(err.Error())
 		return -1
 	}
 	insertSQL, err := buildInsertSQL(tableName, colNames)
 	if err != nil {
-		releaseConn(client)
 		setLastError(err.Error())
 		return -1
 	}
 	// The context must outlive this call — it is cancelled at send/abort.
 	ctx, cancel, err := buildCallCtx(options)
 	if err != nil {
-		releaseConn(client)
 		setLastError(err.Error())
 		return -1
 	}
 	batch, err := client.PrepareBatch(ctx, insertSQL)
 	if err != nil {
 		cancel()
-		releaseConn(client)
 		setLastError(err.Error())
 		return -1
 	}
 
-	b := &batchState{conn: client, batch: batch, cancel: cancel, cols: colNames}
+	b := &batchState{batch: batch, cancel: cancel, cols: colNames}
 	batchesMu.Lock()
 	batchSeq++
 	id := batchSeq
@@ -882,11 +809,10 @@ func clickhouse_batch_abort(id C.int64_t) unsafe.Pointer {
 
 //export clickhouse_async_insert
 func clickhouse_async_insert(query *C.zend_string, wait C.int, params *C.zval, options *C.zval) unsafe.Pointer {
-	client, err := acquireConn()
+	client, err := getConn()
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
-	defer releaseConn(client)
 	queryStr := frankenphp.GoString(unsafe.Pointer(query))
 
 	args, err := buildQueryArgs(params)
@@ -906,11 +832,11 @@ func clickhouse_async_insert(query *C.zend_string, wait C.int, params *C.zval, o
 
 // ── Streaming cursors ─────────────────────────────────────────────────────────
 
-// cursorState is one open streaming query. The pooled connection is held
-// for the cursor's lifetime and released at exhaustion or close.
+// cursorState is one open streaming query; the driver socket it holds
+// is returned to the driver pool when rows.Close() runs at exhaustion
+// or close.
 type cursorState struct {
 	mu     sync.Mutex
-	conn   clickhouse.Conn
 	rows   driver.Rows
 	cancel context.CancelFunc
 	packer *rowPacker
@@ -923,8 +849,7 @@ var (
 	cursorSeq int64
 )
 
-// releaseResources closes the stream and returns the connection to the
-// pool. Callers must hold cur.mu.
+// releaseResources closes the stream. Callers must hold cur.mu.
 func (cur *cursorState) releaseResources() {
 	if cur.done {
 		return
@@ -932,12 +857,11 @@ func (cur *cursorState) releaseResources() {
 	cur.done = true
 	cur.rows.Close()
 	cur.cancel()
-	releaseConn(cur.conn)
 }
 
 //export clickhouse_query_cursor
 func clickhouse_query_cursor(query *C.zend_string, params *C.zval, options *C.zval) C.int64_t {
-	client, err := acquireConn()
+	client, err := getConn()
 	if err != nil {
 		setLastError(err.Error())
 		return -1
@@ -946,7 +870,6 @@ func clickhouse_query_cursor(query *C.zend_string, params *C.zval, options *C.zv
 
 	args, err := buildQueryArgs(params)
 	if err != nil {
-		releaseConn(client)
 		setLastError(err.Error())
 		return -1
 	}
@@ -955,14 +878,12 @@ func clickhouse_query_cursor(query *C.zend_string, params *C.zval, options *C.zv
 	// cursor is exhausted or closed.
 	ctx, cancel, err := buildCallCtx(options)
 	if err != nil {
-		releaseConn(client)
 		setLastError(err.Error())
 		return -1
 	}
 	rows, err := client.Query(ctx, queryStr, args...)
 	if err != nil {
 		cancel()
-		releaseConn(client)
 		setLastError(err.Error())
 		return -1
 	}
@@ -970,12 +891,11 @@ func clickhouse_query_cursor(query *C.zend_string, params *C.zval, options *C.zv
 	if err != nil {
 		rows.Close()
 		cancel()
-		releaseConn(client)
 		setLastError(err.Error())
 		return -1
 	}
 
-	cur := &cursorState{conn: client, rows: rows, cancel: cancel, packer: packer}
+	cur := &cursorState{rows: rows, cancel: cancel, packer: packer}
 	if packer == nil { // zero-column result: nothing to stream
 		cur.releaseResources()
 	}
@@ -1035,61 +955,91 @@ func clickhouse_cursor_close(id C.int64_t) unsafe.Pointer {
 	return frankenphp.PHPString("Ok", false)
 }
 
-func connectClickHouse(dsn string) (clickhouse.Conn, error) {
-	parsed, err := url.Parse(dsn)
+// connectClickHouse builds a driver pool from the DSN. Driver-native
+// parameters pass straight through clickhouse.ParseDSN: multi-host
+// ("h1:9000,h2:9000"), connection_open_strategy (in_order/round_robin/
+// random), max_open_conns, max_idle_conns, conn_max_lifetime,
+// compress (lz4/zstd/gzip/none), secure, skip_verify, dial_timeout,
+// read_timeout… Any other unknown parameter becomes a ClickHouse query
+// setting (driver behavior), so extension-level parameters below are
+// stripped first:
+//
+//	timeout      per-call timeout (Go duration)
+//	ca_cert      path to a PEM CA bundle (implies TLS)
+//	client_cert  path to a PEM client certificate (mutual TLS)
+//	client_key   path to the matching client key
+func connectClickHouse(dsn string) (clickhouse.Conn, time.Duration, error) {
+	u, err := url.Parse(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("invalid DSN: %w", err)
+		return nil, 0, fmt.Errorf("invalid DSN: %w", err)
+	}
+	q := u.Query()
+
+	timeout := time.Duration(0)
+	if v := q.Get("timeout"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			return nil, 0, fmt.Errorf("invalid timeout %q (use a Go duration, e.g. 30s)", v)
+		}
+		timeout = d
+	}
+	caCert := q.Get("ca_cert")
+	clientCert := q.Get("client_cert")
+	clientKey := q.Get("client_key")
+	for _, k := range []string{"timeout", "ca_cert", "client_cert", "client_key"} {
+		q.Del(k)
+	}
+	u.RawQuery = q.Encode()
+
+	opts, err := clickhouse.ParseDSN(u.String())
+	if err != nil {
+		return nil, 0, fmt.Errorf("invalid DSN: %w", err)
+	}
+	// Preserve the historic default: LZ4 on the native protocol unless
+	// explicitly disabled (ParseDSN leaves compression off when the
+	// param is absent; compress=false/none disables it).
+	if opts.Compression == nil {
+		opts.Compression = &clickhouse.Compression{Method: clickhouse.CompressionLZ4}
 	}
 
-	address := parsed.Host
-	if address == "" {
-		return nil, fmt.Errorf("DSN missing host")
-	}
-
-	database := strings.TrimPrefix(parsed.Path, "/")
-	if database == "" {
-		database = "default"
-	}
-
-	username := "default"
-	password := ""
-	if parsed.User != nil {
-		username = parsed.User.Username()
-		if pw, ok := parsed.User.Password(); ok {
-			password = pw
+	if caCert != "" || clientCert != "" || clientKey != "" {
+		if opts.TLS == nil {
+			opts.TLS = &tls.Config{}
+		}
+		if caCert != "" {
+			pem, err := os.ReadFile(caCert)
+			if err != nil {
+				return nil, 0, fmt.Errorf("ca_cert: %w", err)
+			}
+			roots := x509.NewCertPool()
+			if !roots.AppendCertsFromPEM(pem) {
+				return nil, 0, fmt.Errorf("ca_cert: no PEM certificates in %s", caCert)
+			}
+			opts.TLS.RootCAs = roots
+		}
+		if clientCert != "" || clientKey != "" {
+			if clientCert == "" || clientKey == "" {
+				return nil, 0, fmt.Errorf("client_cert and client_key must both be set")
+			}
+			cert, err := tls.LoadX509KeyPair(clientCert, clientKey)
+			if err != nil {
+				return nil, 0, fmt.Errorf("client certificate: %w", err)
+			}
+			opts.TLS.Certificates = []tls.Certificate{cert}
 		}
 	}
 
-	tlsConfig := (*tls.Config)(nil)
-	if parsed.Query().Get("secure") == "true" {
-		skip := parsed.Query().Get("skip_verify") == "true"
-		tlsConfig = &tls.Config{InsecureSkipVerify: skip}
-	}
-
-	compression := &clickhouse.Compression{Method: clickhouse.CompressionLZ4}
-	if parsed.Query().Get("compress") == "false" {
-		compression = nil
-	}
-
-	conn, err := clickhouse.Open(&clickhouse.Options{
-		Addr: []string{address},
-		Auth: clickhouse.Auth{
-			Database: database,
-			Username: username,
-			Password: password,
-		},
-		TLS:         tlsConfig,
-		Compression: compression,
-	})
+	conn, err := clickhouse.Open(opts)
 	if err != nil {
-		return nil, fmt.Errorf("open failed: %w", err)
+		return nil, 0, fmt.Errorf("open failed: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := conn.Ping(ctx); err != nil {
-		return nil, fmt.Errorf("ping failed: %w", err)
+		conn.Close()
+		return nil, 0, fmt.Errorf("ping failed: %w", err)
 	}
 
-	return conn, nil
+	return conn, timeout, nil
 }

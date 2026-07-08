@@ -1124,6 +1124,60 @@ eq($rows[0]['c'], 4, 'wait=false row visible after queue flush');
 clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_async_test");
 
 // =============================================================================
+// DSN pool & transport parameters
+// =============================================================================
+
+suite('DSN pool & transport');
+
+// Reuse the timeout-free base DSN computed in the timeout suite
+$u = parse_url($dsnBase);
+$hostPort = $u['host'] . ':' . ($u['port'] ?? 9000);
+$auth = $u['user'] . (isset($u['pass']) && $u['pass'] !== '' ? ':' . $u['pass'] : '');
+$db = $u['path'] ?? '';
+$qs = isset($u['query']) ? '?' . $u['query'] : '';
+
+// Multi-host address list + open strategy (same host twice: exercises the parser)
+$multi = "clickhouse://$auth@$hostPort,$hostPort$db$qs&connection_open_strategy=round_robin";
+eq(clickhouse_connect($multi), 'Ok', 'multi-host DSN with round_robin connects');
+$rows = clickhouse_query_array("SELECT 1 AS one");
+eq($rows[0]['one'], 1, 'query works on multi-host pool');
+
+// Pool sizing and connection lifetime
+$sized = "clickhouse://$auth@$hostPort$db$qs&max_open_conns=8&max_idle_conns=4&conn_max_lifetime=10m";
+eq(clickhouse_connect($sized), 'Ok', 'pool sizing DSN connects');
+$cur = clickhouse_query_cursor("SELECT number FROM numbers(100)");
+$rows = clickhouse_query_array("SELECT 2 AS two"); // concurrent query while cursor open
+eq($rows[0]['two'], 2, 'query alongside open cursor on sized pool');
+clickhouse_cursor_close($cur);
+
+// ZSTD compression round-trip
+$zstd = "clickhouse://$auth@$hostPort$db$qs&compress=zstd";
+eq(clickhouse_connect($zstd), 'Ok', 'compress=zstd connects');
+$rows = clickhouse_query_array("SELECT repeat('x', 10000) AS blob, number FROM numbers(50)");
+eq(count($rows), 50, 'zstd round-trip row count');
+eq(strlen($rows[0]['blob']), 10000, 'zstd payload intact');
+
+// Legacy compress=false still accepted
+$nocomp = "clickhouse://$auth@$hostPort$db$qs&compress=false";
+eq(clickhouse_connect($nocomp), 'Ok', 'compress=false connects');
+$rows = clickhouse_query_array("SELECT 3 AS three");
+eq($rows[0]['three'], 3, 'uncompressed round-trip');
+
+// Bad extension TLS param fails cleanly without touching the live pool
+$threw = false;
+try {
+    clickhouse_connect($dsnBase . $sep . 'ca_cert=/nonexistent/ca.pem');
+} catch (RuntimeException $e) {
+    $threw = true;
+}
+ok($threw, 'missing ca_cert file throws');
+$rows = clickhouse_query_array("SELECT 4 AS four");
+eq($rows[0]['four'], 4, 'previous pool survives failed TLS connect');
+
+// Back to the standard DSN for cleanup
+eq(clickhouse_connect($dsn), 'Ok', 'reconnect with standard DSN');
+
+// =============================================================================
 // Cleanup
 // =============================================================================
 

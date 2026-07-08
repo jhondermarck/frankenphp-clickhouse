@@ -258,15 +258,29 @@ Types not listed above (Tuple, JSON, Int128/256…) are not yet supported and wi
 ## DSN Format
 
 ```
-clickhouse://[user[:password]@]host:port/database[?param=value]
+clickhouse://[user[:password]@]host1:9000[,host2:9000…]/database[?param=value]
 ```
+
+The connection is a single driver-managed pool shared by all PHP worker
+threads. Multiple hosts give failover / load-balancing across a cluster.
 
 | Parameter | Value | Effect |
 |-----------|-------|--------|
 | `secure` | `true` | Enable TLS |
 | `skip_verify` | `true` | Skip certificate verification |
-| `compress` | `false` | Disable LZ4 (useful for localhost) |
+| `ca_cert` | path | PEM CA bundle for TLS (implies TLS) |
+| `client_cert` / `client_key` | paths | Client certificate for mutual TLS |
+| `compress` | `lz4` (default), `zstd`, `gzip`, `false`/`none` | Transport compression |
 | `timeout` | Go duration (`30s`, `2m`) | Per-call timeout — without it a hung query blocks a PHP worker forever |
+| `connection_open_strategy` | `in_order`, `round_robin`, `random` | Host selection across the address list |
+| `max_open_conns` | int (default 10) | Upper bound on sockets in the pool |
+| `max_idle_conns` | int (default 5) | Idle sockets kept warm |
+| `conn_max_lifetime` | Go duration (default `1h`) | Recycle sockets after this age |
+| `dial_timeout` / `read_timeout` | Go duration | Driver-level network timeouts |
+
+Any other parameter is passed through as a ClickHouse **query setting**
+(driver behavior) — e.g. `?max_execution_time=60` applies to every query
+on the connection.
 
 ## Worker Mode (FrankenPHP)
 
