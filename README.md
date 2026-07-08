@@ -1,6 +1,17 @@
 # frankenphp-clickhouse
 
+[![PHP tests](https://github.com/jhondermarck/frankenphp-clickhouse/actions/workflows/test-php.yml/badge.svg)](https://github.com/jhondermarck/frankenphp-clickhouse/actions/workflows/test-php.yml)
+[![Go tests](https://github.com/jhondermarck/frankenphp-clickhouse/actions/workflows/test-go.yml/badge.svg)](https://github.com/jhondermarck/frankenphp-clickhouse/actions/workflows/test-go.yml)
+[![Build](https://github.com/jhondermarck/frankenphp-clickhouse/actions/workflows/build.yml/badge.svg)](https://github.com/jhondermarck/frankenphp-clickhouse/actions/workflows/build.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Native PHP extension for [FrankenPHP](https://frankenphp.dev/) that exposes ClickHouse directly to PHP via a Go implementation, bypassing JSON entirely.
+
+## Requirements
+
+- **Runtime**: a FrankenPHP binary built with this extension (see [Build](#build)). PHP ≥ 8.2.
+- **Build**: [xcaddy](https://github.com/caddyserver/xcaddy), Go ≥ 1.26, PHP ≥ 8.2 with dev headers, a C toolchain. The simplest path is the Docker build, which needs only Docker.
+- **Server**: ClickHouse reachable over the native TCP protocol (port 9000 by default).
 
 ## Why
 
@@ -356,17 +367,17 @@ clickhouse_disconnect();
 ## Testing
 
 ```bash
-make test      # 118 PHP integration tests
-make test_go   # Go unit tests
+make test      # PHP integration tests (296 assertions)
+make test_go   # Go unit tests (incl. a race-tested concurrency stress test)
 ```
 
 The test suite covers:
-- **SELECT**: query_array returns correct PHP arrays with all column types
-- **INSERT**: batch insert with value verification
-- **19 types**: String, DateTime, Int8-64, UInt8-64, Float32/64, Bool, UUID, IPv4/IPv6, Decimal, Enum
-- **Nullable**: NULL values for all supported types
-- **Exceptions**: RuntimeException on bad query, bad DSN, not connected, double disconnect
-- **Memory leaks**: 200 iterations of query/insert/exec with 0 bytes growth
+- **SELECT / cursor**: query_array and streaming cursors return correct PHP arrays for every supported type
+- **INSERT / batch / async**: all write paths with value verification, including Map/Array (and nullable) columns
+- **Types**: numeric, String/FixedString/Enum, Date*/DateTime*, UUID, IPv4/6, Decimal, Bool, Nullable, LowCardinality, Array, Map, Int128/256, JSON
+- **Options**: per-call settings / query_id / timeout, multiple connections, ClickHouse error codes via `getCode()`
+- **Exceptions**: RuntimeException on bad query, bad DSN, not connected, closed handles
+- **Memory leaks**: repeated query/insert/exec with no growth
 
 ## Build
 
@@ -381,13 +392,15 @@ The Docker image builds the extension from the committed Go module in `clickhous
 
 ### Local dev (macOS, xcaddy)
 
-Requirements: [xcaddy](https://github.com/caddyserver/xcaddy), Go >= 1.21, PHP >= 8.2 with dev headers.
-
 ```bash
-make ext       # Regenerate C bridge files (downloads frankenphp if needed)
 make build     # Compile FrankenPHP binary with the extension
 make bench     # INSERT + SELECT benchmark vs SMI2
 ```
+
+> ⚠️ Do **not** run `make ext`. The C bridge (`clickhousephp.c`,
+> `clickhousephp_arginfo.h`, `clickhousephp.stub.php`) is hand-maintained —
+> the extension generator would overwrite the custom exception/error-code
+> logic. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Configuration (.env)
 
@@ -407,21 +420,30 @@ CH_SELECT_LIMIT=200000
 
 ```
 clickhouse-ext/
-  clickhousephp.go        # PHP-exported functions (//export) + FrankenPHP registration
-  clickhousephp.c         # C bridge (PHP_FUNCTION → Go, throws RuntimeException on error)
-  clickhousephp.h         # C header
-  clickhousephp_arginfo.h # PHP argument info
-  clickhousearray.go      # C PHP array construction + CGo helpers
-  clickhousetypes.go      # ClickHouse type system (19 types) + DateTime formatting
-  clickhousetypes_test.go # Go unit tests
-  go.mod                  # Go module (imported by Docker)
+  clickhousephp.go        # Module registration, pool globals, connect/disconnect
+  conn.go                 # Named connections, ping/version/open/close, DSN → pool
+  errors.go               # CH error codes, per-thread last-error, callSetup, panic guards
+  query.go                # insert/exec/query_array/async, row normalization, type coercion
+  handles.go              # rowPacker, idle-handle reaper, batch + cursor state and exports
+  clickhousearray.go      # C PHP-array construction + CGo helpers
+  clickhousetypes.go      # ClickHouse type system + DateTime formatting
+  clickhousephp.c         # C bridge (PHP_FUNCTION → Go; throws RuntimeException) — hand-maintained
+  clickhousephp.h         # C header — hand-maintained
+  clickhousephp_arginfo.h # PHP argument info — hand-maintained
+  clickhousephp.stub.php  # PHP function signatures — hand-maintained
+  clickhousetypes_test.go # Go unit tests (types, reaper, concurrency)
+  go.mod                  # Go module (imported by Docker / xcaddy)
 web/
-  test.php                # PHP integration tests (118 assertions)
+  test.php                # PHP integration tests
   bench.php               # INSERT + SELECT benchmark vs SMI2
-  bench_http.php          # HTTP worker mode benchmark
   worker.php              # FrankenPHP worker (persistent connection + retry)
 docker/                   # Docker config (ClickHouse, FrankenPHP)
-sample/                   # Standalone Dockerfile (imports from GitHub)
+sample/                   # Standalone production Dockerfile
+docs/                     # Migration guide (smi2 → native)
 .github/workflows/        # CI: Go tests, PHP tests, build
 Makefile
 ```
+
+## License
+
+[MIT](LICENSE) © Jérôme Hondermarck

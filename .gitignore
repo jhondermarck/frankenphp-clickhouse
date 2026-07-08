@@ -3,3 +3,8 @@ vendor
 /frankenphp-clickhouse
 .env
 .idea
+
+# Local xcaddy build workspace
+/clickhouse-ext/build/
+/buildenv_*
+Dockerfile.old
