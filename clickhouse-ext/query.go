@@ -243,6 +243,23 @@ func phpValueTyped(v any, t reflect.Type) any {
 // kinds where possible. Returns the zero Value if the conversion can't be
 // done so the caller can skip rather than panic.
 func coerce(v any, t reflect.Type) reflect.Value {
+	// Nullable columns scan into a pointer type (Map(K,Nullable(V)) →
+	// map[K]*V, Array(Nullable(V)) → []*V). A nil cell is a typed nil
+	// pointer; a present cell is coerced to the element type and boxed.
+	// Without this every nullable element would fail the conversion below
+	// and be silently dropped.
+	if t.Kind() == reflect.Pointer {
+		if v == nil {
+			return reflect.Zero(t)
+		}
+		ev := coerce(v, t.Elem())
+		if !ev.IsValid() {
+			return reflect.Value{}
+		}
+		p := reflect.New(t.Elem())
+		p.Elem().Set(ev)
+		return p
+	}
 	rv := reflect.ValueOf(v)
 	if !rv.IsValid() {
 		return reflect.Value{}

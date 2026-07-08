@@ -9,18 +9,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 	"unsafe"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/dunglas/frankenphp"
-)
-
-var (
-	lastError     string
-	lastErrorCode int32 // ClickHouse server error code, 0 if none
-	lastErrorMu   sync.Mutex
 )
 
 // chErrorCode extracts the ClickHouse server error code, 0 if the
@@ -174,37 +167,33 @@ func idPanicGuard(ret *C.int64_t) {
 	}
 }
 
+// setLastError / setChError record the pending error in a thread-local
+// C buffer (see clickhousephp.c). The store and the bridge's later read
+// happen on the same worker thread, so concurrent requests never see each
+// other's message or code.
 func setLastError(msg string) {
-	lastErrorMu.Lock()
-	lastError = msg
-	lastErrorCode = 0
-	lastErrorMu.Unlock()
+	cmsg := C.CString(msg)
+	C.ch_set_last_error(cmsg, 0)
+	C.free(unsafe.Pointer(cmsg))
 }
 
 // setChError records a driver error with its ClickHouse server code.
 func setChError(prefix string, err error) {
-	lastErrorMu.Lock()
-	lastError = prefix + err.Error()
-	lastErrorCode = chErrorCode(err)
-	lastErrorMu.Unlock()
+	cmsg := C.CString(prefix + err.Error())
+	C.ch_set_last_error(cmsg, C.long(chErrorCode(err)))
+	C.free(unsafe.Pointer(cmsg))
 }
 
 //export clickhouse_get_last_error_code
 func clickhouse_get_last_error_code() C.int64_t {
-	lastErrorMu.Lock()
-	defer lastErrorMu.Unlock()
-	return C.int64_t(lastErrorCode)
+	return C.int64_t(C.ch_last_error_code())
 }
 
 //export clickhouse_get_last_error
 func clickhouse_get_last_error() unsafe.Pointer {
-	lastErrorMu.Lock()
-	err := lastError
-	lastError = ""
-	lastErrorCode = 0
-	lastErrorMu.Unlock()
-	if err == "" {
+	c := C.ch_take_last_error()
+	if c == nil {
 		return nil
 	}
-	return frankenphp.PHPString(err, false)
+	return frankenphp.PHPString(C.GoString(c), false)
 }

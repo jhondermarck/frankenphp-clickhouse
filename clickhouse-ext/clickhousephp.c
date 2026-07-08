@@ -11,6 +11,38 @@
 #include "clickhousephp_arginfo.h"
 #include "_cgo_export.h"
 
+// ── Thread-local last-error channel ─────────────────────────────────────────
+// FrankenPHP dispatches each request on its own worker thread and the Go
+// side of a NULL/-1-returning call runs on that same thread (a cgo callback
+// is pinned to its caller thread). Storing the pending error per-thread stops
+// one thread clobbering another's message/code in the window between the Go
+// call returning and this bridge reading it back.
+static __thread char ch_err_buf[4096];
+static __thread int  ch_err_set  = 0;
+static __thread long ch_err_code = 0;
+
+void ch_set_last_error(const char *msg, long code) {
+    if (msg != NULL) {
+        strncpy(ch_err_buf, msg, sizeof(ch_err_buf) - 1);
+        ch_err_buf[sizeof(ch_err_buf) - 1] = '\0';
+        ch_err_set = 1;
+    } else {
+        ch_err_set = 0;
+    }
+    ch_err_code = code;
+}
+
+long ch_last_error_code(void) { return ch_err_code; }
+
+// Returns the pending message (thread-local storage, do not free) and clears
+// the channel, or NULL if none.
+const char *ch_take_last_error(void) {
+    if (!ch_err_set) return NULL;
+    ch_err_set  = 0;
+    ch_err_code = 0;
+    return ch_err_buf;
+}
+
 // Helper: if result starts with "ERROR: " or "ERROR[code]: ", throw
 // RuntimeException (the ClickHouse server error code becomes the
 // exception code) and return 1.

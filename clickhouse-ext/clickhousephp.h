@@ -15,6 +15,10 @@
 
 extern zend_module_entry clickhousephp_module_entry;
 
-
+// Thread-local last-error channel (defined in clickhousephp.c). Set from Go,
+// read by the PHP-function bridge — see the comment in clickhousephp.c.
+void ch_set_last_error(const char *msg, long code);
+long ch_last_error_code(void);
+const char *ch_take_last_error(void);
 
 #endif

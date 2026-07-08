@@ -1354,6 +1354,29 @@ eq($rows[1]['matrix'], [[9]], 'batch nested Array round-trips');
 
 clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_wmap_test");
 
+// Nullable element types scan into pointer Go types (map[K]*V, []*V) — the
+// write path must box present values and pass typed nils, not drop them.
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_wnull_test");
+clickhouse_exec("CREATE TABLE clickhousephp_wnull_test (
+    id      UInt32,
+    opt_lbl Map(String, Nullable(String)),
+    opt_arr Array(Nullable(UInt32))
+) ENGINE = Memory");
+eq(clickhouse_insert('clickhousephp_wnull_test',
+    [['id' => 1, 'opt_lbl' => ['a' => 'x', 'b' => null], 'opt_arr' => [1, null, 3]]],
+    ['id', 'opt_lbl', 'opt_arr']), 'Ok', 'insert Nullable Map/Array cells');
+$b = clickhouse_batch_begin('clickhousephp_wnull_test', ['id', 'opt_lbl', 'opt_arr']);
+clickhouse_batch_append($b, [[2, ['k' => null], [null, 5]]]);
+eq(clickhouse_batch_send($b), 'Ok', 'batch Nullable Map/Array cells');
+
+$rows = clickhouse_query_array("SELECT * FROM clickhousephp_wnull_test ORDER BY id");
+eq($rows[0]['opt_lbl'], ['a' => 'x', 'b' => null], 'Map(String,Nullable(String)) keeps value and null');
+eq($rows[0]['opt_arr'], [1, null, 3], 'Array(Nullable(UInt32)) keeps values and null');
+eq($rows[1]['opt_lbl'], ['k' => null], 'batch Map null value round-trips');
+eq($rows[1]['opt_arr'], [null, 5], 'batch Array null element round-trips');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_wnull_test");
+
 // =============================================================================
 // Handle lifetime vs DSN timeout
 // =============================================================================
