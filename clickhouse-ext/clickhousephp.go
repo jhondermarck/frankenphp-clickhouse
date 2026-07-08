@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/url"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -479,6 +480,11 @@ func newRowPacker(rows driver.Rows) (*rowPacker, error) {
 		}
 		metas[i] = m
 		dests[i] = allocScanDest(m)
+		if dests[i] == nil {
+			// Complex shapes (Map, nested arrays) scan into the driver's
+			// native type and are converted generically via reflection.
+			dests[i] = reflect.New(ct.ScanType()).Interface()
+		}
 	}
 	return &rowPacker{cols: cols, metas: metas, dests: dests}, nil
 }

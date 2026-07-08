@@ -98,9 +98,70 @@ func TestParseColMetaArray(t *testing.T) {
 }
 
 func TestParseColMetaUnsupported(t *testing.T) {
-	for _, dbType := range []string{"Map(String, String)", "Tuple(UInt8)", "Nothing"} {
+	for _, dbType := range []string{"Tuple(UInt8)", "Nothing", "Map(String)"} {
 		if _, err := parseColMeta(dbType); err == nil {
 			t.Errorf("parseColMeta(%q) should return an error", dbType)
 		}
+	}
+}
+
+func TestParseColMetaMap(t *testing.T) {
+	cases := []struct {
+		dbType  string
+		keyKind colKind
+		valKind colKind
+	}{
+		{"Map(String, String)", kindString, kindString},
+		{"Map(String, UInt64)", kindString, kindUInt64},
+		{"Map(UInt8, String)", kindUInt8, kindString},
+		{"Map(LowCardinality(String), String)", kindString, kindString},
+		{"Map(String, Array(String))", kindString, kindArray},
+		{"Map(String, Map(String, UInt32))", kindString, kindMap},
+		{"Map(String, Decimal(18, 4))", kindString, kindDecimal},
+		{"Map(String, Enum8('a' = 1, 'b' = 2))", kindString, kindString},
+	}
+	for _, tt := range cases {
+		t.Run(tt.dbType, func(t *testing.T) {
+			m, err := parseColMeta(tt.dbType)
+			if err != nil {
+				t.Fatalf("parseColMeta(%q) error: %v", tt.dbType, err)
+			}
+			if m.kind != kindMap {
+				t.Fatalf("kind = %d, want kindMap", m.kind)
+			}
+			if m.inner == nil || m.inner.kind != tt.keyKind {
+				t.Errorf("key kind mismatch: %+v, want %d", m.inner, tt.keyKind)
+			}
+			if m.value == nil || m.value.kind != tt.valKind {
+				t.Errorf("value kind mismatch: %+v, want %d", m.value, tt.valKind)
+			}
+		})
+	}
+
+	// Nullable map value
+	m, err := parseColMeta("Map(String, Nullable(String))")
+	if err != nil {
+		t.Fatalf("Nullable value: %v", err)
+	}
+	if !m.value.nullable {
+		t.Error("Map(String, Nullable(String)) value should be nullable")
+	}
+}
+
+func TestSplitTopLevelComma(t *testing.T) {
+	cases := []struct{ in, k, v string }{
+		{"String, UInt64", "String", "UInt64"},
+		{"String, Enum8('a' = 1, 'b' = 2)", "String", "Enum8('a' = 1, 'b' = 2)"},
+		{"LowCardinality(String), Array(String)", "LowCardinality(String)", "Array(String)"},
+		{"String, Map(String, String)", "String", "Map(String, String)"},
+	}
+	for _, tt := range cases {
+		k, v, ok := splitTopLevelComma(tt.in)
+		if !ok || k != tt.k || v != tt.v {
+			t.Errorf("splitTopLevelComma(%q) = (%q, %q, %v), want (%q, %q)", tt.in, k, v, ok, tt.k, tt.v)
+		}
+	}
+	if _, _, ok := splitTopLevelComma("NoCommaHere"); ok {
+		t.Error("splitTopLevelComma without top-level comma should return ok=false")
 	}
 }

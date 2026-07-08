@@ -32,12 +32,34 @@ const (
 	kindIPv6
 	kindDecimal
 	kindArray
+	kindMap
 )
 
 type colMeta struct {
 	kind     colKind
 	nullable bool
-	inner    *colMeta // for Array(T)
+	inner    *colMeta // for Array(T): element; for Map(K, V): key
+	value    *colMeta // for Map(K, V): value
+}
+
+// splitTopLevelComma splits "K, V" at the first comma outside any
+// parentheses — Map value types can themselves carry commas
+// (Enum8('a' = 1, 'b' = 2), Decimal(18, 4), nested Maps…).
+func splitTopLevelComma(s string) (string, string, bool) {
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				return strings.TrimSpace(s[:i]), strings.TrimSpace(s[i+1:]), true
+			}
+		}
+	}
+	return "", "", false
 }
 
 func parseColMeta(dbType string) (colMeta, error) {
@@ -64,6 +86,21 @@ strip:
 			return colMeta{}, err
 		}
 		return colMeta{kind: kindArray, nullable: nullable, inner: &inner}, nil
+	}
+	if strings.HasPrefix(raw, "Map(") && strings.HasSuffix(raw, ")") {
+		keyStr, valStr, ok := splitTopLevelComma(raw[len("Map(") : len(raw)-1])
+		if !ok {
+			return colMeta{}, fmt.Errorf("unsupported type: %s", dbType)
+		}
+		keyMeta, err := parseColMeta(keyStr)
+		if err != nil {
+			return colMeta{}, err
+		}
+		valMeta, err := parseColMeta(valStr)
+		if err != nil {
+			return colMeta{}, err
+		}
+		return colMeta{kind: kindMap, inner: &keyMeta, value: &valMeta}, nil
 	}
 	if strings.HasPrefix(raw, "DateTime64") {
 		return colMeta{kind: kindDateTime64, nullable: nullable}, nil
@@ -199,12 +236,16 @@ func allocScanDest(m colMeta) interface{} {
 	case kindArray:
 		return allocArrayScanDest(m.inner)
 	}
-	return new(string)
+	// Map, and anything else without a typed destination: the caller
+	// falls back to reflect.New(ColumnType.ScanType()).
+	return nil
 }
 
 func allocArrayScanDest(inner *colMeta) interface{} {
-	if inner == nil {
-		return new(interface{})
+	// Nested arrays and maps scan into the driver's native type via the
+	// caller's reflect fallback.
+	if inner == nil || inner.kind == kindArray || inner.kind == kindMap {
+		return nil
 	}
 	if inner.nullable {
 		switch inner.kind {
@@ -280,7 +321,7 @@ func allocArrayScanDest(inner *colMeta) interface{} {
 	case kindDecimal:
 		return new([]decimal.Decimal)
 	}
-	return new(interface{})
+	return nil
 }
 
 // resetNullableDest sets the inner pointer of a nullable scan destination to nil.

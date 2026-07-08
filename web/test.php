@@ -719,20 +719,90 @@ eq($rows[1]['code'], 'ABC', 'FixedString(3) value');
 clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_edge_test");
 
 // Unsupported column type throws instead of returning an empty array
-clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_map_test");
-clickhouse_exec("CREATE TABLE clickhousephp_map_test (m Map(String, String)) ENGINE = Memory");
-clickhouse_exec("INSERT INTO clickhousephp_map_test VALUES (map('k', 'v'))");
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_unsup_test");
+clickhouse_exec("CREATE TABLE clickhousephp_unsup_test (t Tuple(UInt8, String)) ENGINE = Memory");
+clickhouse_exec("INSERT INTO clickhousephp_unsup_test VALUES ((1, 'x'))");
 $unsupportedThrew = false;
 $unsupportedMsg = '';
 try {
-    clickhouse_query_array("SELECT * FROM clickhousephp_map_test");
+    clickhouse_query_array("SELECT * FROM clickhousephp_unsup_test");
 } catch (RuntimeException $e) {
     $unsupportedThrew = true;
     $unsupportedMsg = $e->getMessage();
 }
 ok($unsupportedThrew, 'unsupported column type throws RuntimeException');
 ok(str_contains($unsupportedMsg, 'unsupported type'), 'exception names the unsupported type', $unsupportedMsg);
-clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_map_test");
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_unsup_test");
+
+// =============================================================================
+// Map(K, V) and nested arrays
+// =============================================================================
+
+suite('Map and nested arrays');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_nested_test");
+clickhouse_exec("CREATE TABLE clickhousephp_nested_test (
+    labels     Map(String, String),
+    counters   Map(String, UInt64),
+    by_code    Map(UInt8, String),
+    tags_by_ns Map(String, Array(String)),
+    opt_vals   Map(String, Nullable(String)),
+    matrix     Array(Array(UInt32)),
+    names2d    Array(Array(String)),
+    opt_flags  Array(Nullable(UInt64))
+) ENGINE = Memory");
+clickhouse_exec("INSERT INTO clickhousephp_nested_test VALUES (
+    map('env', 'prod', 'region', 'eu'),
+    map('hits', 42, 'big', 18446744073709551615),
+    map(1, 'run', 2, 'idle'),
+    map('a', ['x', 'y'], 'b', []),
+    map('k1', 'v1', 'k2', NULL),
+    [[1, 2], [3], []],
+    [['a', 'b'], ['c']],
+    [7, NULL, 9]
+)");
+
+$rows = clickhouse_query_array("SELECT * FROM clickhousephp_nested_test");
+eq(count($rows), 1, 'nested test row count');
+$r = $rows[0];
+
+// Map(String, String) → assoc array
+eq($r['labels'], ['env' => 'prod', 'region' => 'eu'], 'Map(String, String) as assoc array');
+
+// Map(String, UInt64) → int values, float above PHP_INT_MAX
+eq($r['counters']['hits'], 42, 'Map value UInt64 as int');
+ok(is_float($r['counters']['big']), 'Map value UInt64 > PHP_INT_MAX as float');
+
+// Map(UInt8, String) → integer keys
+eq($r['by_code'], [1 => 'run', 2 => 'idle'], 'Map(UInt8, String) with int keys');
+ok(array_key_exists(1, $r['by_code']) && is_string($r['by_code'][1]), 'int key is a real PHP int key');
+
+// Map(String, Array(String)) → nested arrays as values
+eq($r['tags_by_ns'], ['a' => ['x', 'y'], 'b' => []], 'Map(String, Array(String))');
+
+// Map(String, Nullable(String)) → null values preserved
+eq($r['opt_vals'], ['k1' => 'v1', 'k2' => null], 'Map(String, Nullable(String)) keeps NULL');
+
+// Array(Array(UInt32)) — previously unreadable
+eq($r['matrix'], [[1, 2], [3], []], 'Array(Array(UInt32))');
+eq($r['names2d'], [['a', 'b'], ['c']], 'Array(Array(String))');
+
+// Array(Nullable(UInt64)) — previously a silently empty array
+eq($r['opt_flags'], [7, null, 9], 'Array(Nullable(UInt64)) no longer silently empty');
+
+// Empty map row
+clickhouse_exec("INSERT INTO clickhousephp_nested_test VALUES (map(), map(), map(), map(), map(), [], [], [])");
+$rows = clickhouse_query_array("SELECT labels, matrix FROM clickhousephp_nested_test ORDER BY length(labels) ASC LIMIT 1");
+eq($rows[0]['labels'], [], 'empty Map is empty array');
+eq($rows[0]['matrix'], [], 'empty nested array');
+
+// Map through the streaming cursor
+$cur = clickhouse_query_cursor("SELECT labels FROM clickhousephp_nested_test ORDER BY length(labels) DESC LIMIT 1");
+$chunk = clickhouse_cursor_fetch($cur);
+eq($chunk[0]['labels'], ['env' => 'prod', 'region' => 'eu'], 'Map through cursor');
+clickhouse_cursor_close($cur);
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_nested_test");
 
 // =============================================================================
 // DSN timeout & identifier validation

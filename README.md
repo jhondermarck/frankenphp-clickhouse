@@ -182,10 +182,11 @@ clickhouse_disconnect();
 | `Decimal(P,S)` | `string` | Preserves precision |
 | `Enum8`, `Enum16` | `string` | Enum name (e.g. `"active"`) |
 | `Nullable(T)` | `T` or `null` | Any supported type |
-| `Array(T)` | `array` | Indexed PHP array, any inner type |
+| `Array(T)` | `array` | Indexed PHP array, any inner type incl. `Array(Array(T))` and `Array(Map(K, V))` |
+| `Map(K, V)` | `array` | Keyed PHP array — `int` keys for integer `K`, `string` otherwise; keys sorted |
 | `LowCardinality(T)` | same as `T` | Transparent wrapper, incl. `LowCardinality(Nullable(T))` |
 
-Types not listed above (Map, Tuple) are not yet supported and will throw a `RuntimeException`.
+Types not listed above (Tuple, JSON, Int128/256…) are not yet supported and will throw a `RuntimeException`.
 
 ## DSN Format
 
