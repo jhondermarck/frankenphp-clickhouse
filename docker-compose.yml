@@ -5,19 +5,28 @@ services:
       dockerfile: docker/frankenphp/Dockerfile
     container_name: frankenphp
     ports:
-      - "8080:8080"
+      - "${FRANKENPHP_PORT:-8080}:8080"
     volumes:
       - ./web:/app
+    # CH_DSN injected here wins over the bind-mounted /app/.env (Dotenv is
+    # immutable) — the host .env targets host-mapped ports, not the
+    # in-network clickhouse:9000, so sharing it would break the worker.
+    environment:
+      - CH_DSN=clickhouse://default:strongpassword@clickhouse:9000/events_bench?secure=false&timeout=30s
     command: sh -c '[ -f /app/.env ] || cp /app/.env.example /app/.env && frankenphp run --config /etc/caddy/Caddyfile'
     depends_on:
-      - clickhouse
+      clickhouse:
+        condition: service_healthy
 
   # ClickHouse Database
   clickhouse:
-    image: clickhouse/clickhouse-server:latest
+    # Pinned: a floating `latest` makes benchmarks and CI non-reproducible.
+    image: clickhouse/clickhouse-server:26.5
     ports:
-      - "8123:8123" # HTTP port
-      - "9000:9000" # Native port
+      # Host ports are overridable (root .env or shell) to coexist with
+      # another local ClickHouse already bound to 8123/9000.
+      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123" # HTTP port
+      - "${CLICKHOUSE_NATIVE_PORT:-9000}:9000" # Native port
     environment:
       - CLICKHOUSE_DB=events_bench
       - CLICKHOUSE_USER=default
@@ -25,6 +34,11 @@ services:
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./docker/clickhouse/migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1'"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
 
 volumes:
   clickhouse_data:

@@ -19,20 +19,24 @@ restart:
 
 # ── Local dev (macOS, xcaddy) ─────────────────────────────────────────────────
 
+# Chemins homebrew résolus dynamiquement (icu4c est keg-only et versionné :
+# un chemin en dur casse à chaque bump de version).
+BREW_PREFIX  := $(shell brew --prefix)
+BREW_LIBS    := icu4c pcre2 curl libsodium libzip unixodbc
+BREW_LDPATHS := $(foreach lib,$(BREW_LIBS),-L$(shell brew --prefix $(lib))/lib)
+
+CGO_CFLAGS_LOCAL  = $$(php-config --includes) -I$(BREW_PREFIX)/include
+CGO_LDFLAGS_LOCAL = $(BREW_LDPATHS) \
+	$$(php-config --ldflags) \
+	$$(php-config --libs) \
+	-L$(BREW_PREFIX)/lib -lbrotlienc -lbrotlicommon -lbrotlidec -lwatcher-c
+
 build:
 	CGO_ENABLED=1 \
 	GOPATH=$(HOME)/go \
 	XCADDY_GO_BUILD_FLAGS='-ldflags "-w -s" -tags nobadger,nomysql,nopgx -p 2' \
-	CGO_CFLAGS="$$(php-config --includes) -I/opt/homebrew/include" \
-	CGO_LDFLAGS="-L/opt/homebrew/opt/icu4c@77/lib \
-	              -L/opt/homebrew/opt/pcre2/lib \
-	              -L/opt/homebrew/opt/curl/lib \
-	              -L/opt/homebrew/opt/libsodium/lib \
-	              -L/opt/homebrew/opt/libzip/lib \
-	              -L/opt/homebrew/opt/unixodbc/lib \
-	              $$(php-config --ldflags) \
-	              $$(php-config --libs) \
-	              -L/opt/homebrew/lib -lbrotlienc -lbrotlicommon -lbrotlidec -lwatcher-c" \
+	CGO_CFLAGS="$(CGO_CFLAGS_LOCAL)" \
+	CGO_LDFLAGS="$(CGO_LDFLAGS_LOCAL)" \
 	xcaddy build \
 	  --output frankenphp-clickhouse \
 	  --with github.com/dunglas/frankenphp/caddy \
@@ -70,14 +74,6 @@ test:
 test_go:
 	CGO_ENABLED=1 \
 	GOPATH=$(HOME)/go \
-	CGO_CFLAGS="$$(php-config --includes) -I/opt/homebrew/include" \
-	CGO_LDFLAGS="-L/opt/homebrew/opt/icu4c@77/lib \
-	              -L/opt/homebrew/opt/pcre2/lib \
-	              -L/opt/homebrew/opt/curl/lib \
-	              -L/opt/homebrew/opt/libsodium/lib \
-	              -L/opt/homebrew/opt/libzip/lib \
-	              -L/opt/homebrew/opt/unixodbc/lib \
-	              $$(php-config --ldflags) \
-	              $$(php-config --libs) \
-	              -L/opt/homebrew/lib -lbrotlienc -lbrotlicommon -lbrotlidec -lwatcher-c" \
+	CGO_CFLAGS="$(CGO_CFLAGS_LOCAL)" \
+	CGO_LDFLAGS="$(CGO_LDFLAGS_LOCAL)" \
 	go test -C clickhouse-ext -v -count=1 .

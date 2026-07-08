@@ -142,7 +142,7 @@ clickhouse_disconnect();
 
 | ClickHouse Type | PHP Type | Notes |
 |----------------|----------|-------|
-| `String`, `FixedString` | `string` | |
+| `String`, `FixedString(N)` | `string` | |
 | `DateTime` | `string` | `Y-m-d H:i:s` (e.g. `"2024-01-15 08:00:00"`) |
 | `DateTime64` | `string` | `Y-m-d H:i:s.u` (e.g. `"2024-01-15 08:00:00.123456"`) |
 | `Date`, `Date32` | `string` | `Y-m-d H:i:s` (time part is `00:00:00`) |
@@ -157,7 +157,7 @@ clickhouse_disconnect();
 | `Enum8`, `Enum16` | `string` | Enum name (e.g. `"active"`) |
 | `Nullable(T)` | `T` or `null` | Any supported type |
 | `Array(T)` | `array` | Indexed PHP array, any inner type |
-| `LowCardinality(T)` | same as `T` | Transparent wrapper |
+| `LowCardinality(T)` | same as `T` | Transparent wrapper, incl. `LowCardinality(Nullable(T))` |
 
 Types not listed above (Map, Tuple) are not yet supported and will throw a `RuntimeException`.
 
@@ -172,6 +172,7 @@ clickhouse://[user[:password]@]host:port/database[?param=value]
 | `secure` | `true` | Enable TLS |
 | `skip_verify` | `true` | Skip certificate verification |
 | `compress` | `false` | Disable LZ4 (useful for localhost) |
+| `timeout` | Go duration (`30s`, `2m`) | Per-call timeout — without it a hung query blocks a PHP worker forever |
 
 ## Worker Mode (FrankenPHP)
 

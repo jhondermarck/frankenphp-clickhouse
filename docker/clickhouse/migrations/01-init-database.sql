@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS events (
     created_at DateTime64(3) DEFAULT now64(),
     updated_at DateTime64(3) DEFAULT now64(),
 ) ENGINE = MergeTree()
-ORDER BY (start, id)
+-- Low-cardinality filter column first, then the time dimension, then the
+-- high-cardinality id — enables granule skipping on WHERE type = ? queries.
+ORDER BY (type, start, id)
 TTL toDateTime(start) + INTERVAL 1 YEAR;
 

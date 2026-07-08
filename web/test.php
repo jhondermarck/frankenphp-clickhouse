@@ -696,6 +696,100 @@ try {
 ok($nestedNoColThrew, 'nested sequential without columns throws');
 
 // =============================================================================
+// Type-parse edge cases — LC(Nullable), FixedString(N), unsupported types
+// =============================================================================
+
+suite('Type-parse edge cases');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_edge_test");
+clickhouse_exec("CREATE TABLE clickhousephp_edge_test (
+    tag     LowCardinality(String),
+    opt_tag LowCardinality(Nullable(String)),
+    code    FixedString(3)
+) ENGINE = Memory");
+clickhouse_exec("INSERT INTO clickhousephp_edge_test VALUES ('prod', 'x', 'ABC'), ('dev', NULL, 'XYZ')");
+
+$rows = clickhouse_query_array("SELECT * FROM clickhousephp_edge_test ORDER BY tag");
+eq(count($rows), 2, 'edge case rows = 2');
+eq($rows[1]['tag'], 'prod', 'LowCardinality(String) value');
+eq($rows[1]['opt_tag'], 'x', 'LowCardinality(Nullable(String)) value');
+ok($rows[0]['opt_tag'] === null, 'LowCardinality(Nullable(String)) NULL');
+eq($rows[1]['code'], 'ABC', 'FixedString(3) value');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_edge_test");
+
+// Unsupported column type throws instead of returning an empty array
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_map_test");
+clickhouse_exec("CREATE TABLE clickhousephp_map_test (m Map(String, String)) ENGINE = Memory");
+clickhouse_exec("INSERT INTO clickhousephp_map_test VALUES (map('k', 'v'))");
+$unsupportedThrew = false;
+$unsupportedMsg = '';
+try {
+    clickhouse_query_array("SELECT * FROM clickhousephp_map_test");
+} catch (RuntimeException $e) {
+    $unsupportedThrew = true;
+    $unsupportedMsg = $e->getMessage();
+}
+ok($unsupportedThrew, 'unsupported column type throws RuntimeException');
+ok(str_contains($unsupportedMsg, 'unsupported type'), 'exception names the unsupported type', $unsupportedMsg);
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_map_test");
+
+// =============================================================================
+// DSN timeout & identifier validation
+// =============================================================================
+
+suite('DSN timeout & identifier validation');
+
+// Base DSN without any timeout param — the configured DSN may already
+// carry one, and a duplicated param would shadow the test value.
+$dsnBase = preg_replace('/\?timeout=[^&]*&/', '?', $dsn);
+$dsnBase = preg_replace('/[?&]timeout=[^&]*/', '', $dsnBase);
+$sep = str_contains($dsnBase, '?') ? '&' : '?';
+
+// Invalid timeout value → connect fails without clobbering the pool
+$badTimeoutThrew = false;
+try {
+    clickhouse_connect($dsnBase . $sep . 'timeout=banana');
+} catch (RuntimeException $e) {
+    $badTimeoutThrew = true;
+}
+ok($badTimeoutThrew, 'invalid timeout value throws');
+$rows = clickhouse_query_array("SELECT 1 AS one");
+eq($rows[0]['one'], 1, 'previous connection survives failed reconnect');
+
+// Short timeout → a slow query is aborted by the context
+$r = clickhouse_connect($dsnBase . $sep . 'timeout=200ms');
+eq($r, 'Ok', 'connect with timeout param');
+$timeoutThrew = false;
+try {
+    clickhouse_query_array("SELECT sleep(1)");
+} catch (RuntimeException $e) {
+    $timeoutThrew = true;
+}
+ok($timeoutThrew, 'slow query aborted by DSN timeout');
+
+// Back to a connection without timeout
+$r = clickhouse_connect($dsn);
+eq($r, 'Ok', 'reconnect without timeout');
+
+// Invalid identifiers are rejected before reaching SQL
+$badTableThrew = false;
+try {
+    clickhouse_insert('events; DROP TABLE x', ['a'], ['col']);
+} catch (RuntimeException $e) {
+    $badTableThrew = true;
+}
+ok($badTableThrew, 'invalid table name throws');
+
+$badColThrew = false;
+try {
+    clickhouse_insert('clickhousephp_events_test', ['a'], ['col) VALUES (1); --']);
+} catch (RuntimeException $e) {
+    $badColThrew = true;
+}
+ok($badColThrew, 'invalid column name throws');
+
+// =============================================================================
 // Cleanup
 // =============================================================================
 
