@@ -42,7 +42,8 @@ $rows = [['id'=>..., 'start'=>...], ...]
 
 ## Benchmarks
 
-Machine: Apple M-series, ClickHouse on localhost.
+Machine: Apple M-series. ClickHouse 26.5 in Docker (native TCP port).
+FrankenPHP 1.12.4 (PHP 8.5), clickhouse-go v2.47.0.
 Baseline: smi2/phpclickhouse (HTTP + `json_decode`).
 Parameters: 3 warmup + 20 iterations, 100k rows.
 
@@ -51,8 +52,8 @@ Parameters: 3 warmup + 20 iterations, 100k rows.
 ```
   Method                          avg      min      p95      rows    vs SMI2
   ──────────────────────────────────────────────────────────────────────────
-  SMI2 – HTTP + php-array        0.394s   0.337s   0.530s   100,000   ref
-  Go TCP + query_array            0.046s   0.043s   0.062s   100,000  ×8.51
+  SMI2 – HTTP + php-array        0.324s   0.300s   0.352s   100,000   ref
+  Go TCP + query_array            0.038s   0.036s   0.041s   100,000  ×8.54
 ```
 
 ### INSERT (100k rows batch)
@@ -60,8 +61,8 @@ Parameters: 3 warmup + 20 iterations, 100k rows.
 ```
   Method                          avg      min      p95      rows/s   vs SMI2
   ──────────────────────────────────────────────────────────────────────────
-  SMI2 – HTTP insert             0.496s   0.475s   0.547s   201,560   ref
-  Go TCP + clickhouse_insert     0.172s   0.149s   0.225s   581,786  ×2.89
+  SMI2 – HTTP insert             0.453s   0.430s   0.537s   220,882   ref
+  Go TCP + clickhouse_insert     0.144s   0.130s   0.201s   692,786  ×3.14
 ```
 
 > INSERT variance comes from MergeTree background merges on the ClickHouse side, not the code.
