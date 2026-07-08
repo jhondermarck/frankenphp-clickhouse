@@ -279,61 +279,82 @@ func clickhouse_disconnect() unsafe.Pointer {
 	return frankenphp.PHPString("Ok", false)
 }
 
-//export clickhouse_insert
-func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval, options *C.zval) unsafe.Pointer {
-	client, err := acquireConn()
+// parseColumnNames extracts an optional PHP column list.
+func parseColumnNames(columns *C.zval) ([]string, error) {
+	if columns == nil {
+		return nil, nil
+	}
+	colAny, err := frankenphp.GoValue[any](unsafe.Pointer(columns))
 	if err != nil {
-		return frankenphp.PHPString("ERROR: "+err.Error(), false)
+		return nil, fmt.Errorf("columns: %s", err)
 	}
-	defer releaseConn(client)
-	tableName := frankenphp.GoString(unsafe.Pointer(table))
+	if colAny == nil {
+		return nil, nil
+	}
+	colSlice, ok := colAny.([]any)
+	if !ok {
+		return nil, fmt.Errorf("columns is not an array")
+	}
+	colNames := make([]string, len(colSlice))
+	for i, c := range colSlice {
+		s, ok := c.(string)
+		if !ok {
+			return nil, fmt.Errorf("column name is not a string")
+		}
+		colNames[i] = s
+	}
+	return colNames, nil
+}
+
+// buildInsertSQL validates identifiers (they are concatenated into SQL)
+// and assembles the INSERT statement.
+func buildInsertSQL(tableName string, colNames []string) (string, error) {
 	if !validIdent(tableName) {
-		return frankenphp.PHPString(fmt.Sprintf("Insert error: invalid table name %q", tableName), false)
+		return "", fmt.Errorf("invalid table name %q", tableName)
 	}
-
-	// Parse columns (optional — may be nil or empty)
-	var colNames []string
-	if columns != nil {
-		colAny, err := frankenphp.GoValue[any](unsafe.Pointer(columns))
-		if err != nil {
-			return frankenphp.PHPString("Insert error (columns): "+err.Error(), false)
-		}
-		if colAny != nil {
-			colSlice, ok := colAny.([]any)
-			if !ok {
-				return frankenphp.PHPString("Insert error: columns is not an array", false)
-			}
-			colNames = make([]string, len(colSlice))
-			for i, c := range colSlice {
-				s, ok := c.(string)
-				if !ok {
-					return frankenphp.PHPString("Insert error: column name is not a string", false)
-				}
-				colNames[i] = s
+	sql := "INSERT INTO " + tableName
+	if len(colNames) > 0 {
+		for _, col := range colNames {
+			if !validIdent(col) {
+				return "", fmt.Errorf("invalid column name %q", col)
 			}
 		}
+		sql += " (" + strings.Join(colNames, ", ") + ")"
 	}
+	return sql, nil
+}
 
-	// Parse values
+// normalizeRows converts PHP values — associative rows, nested
+// sequential rows, or a flat array with stride — into row slices.
+// When inferCols is true and colNames is empty, associative rows
+// populate colNames (sorted); nested rows without columns are allowed
+// only when requireColsForNested is false (incremental batches, where
+// the INSERT statement is already fixed).
+func normalizeRows(values *C.zval, colNames []string, inferCols, requireColsForNested bool) ([][]any, []string, error) {
 	valAny, err := frankenphp.GoValue[any](unsafe.Pointer(values))
 	if err != nil {
-		return frankenphp.PHPString("Insert error: "+err.Error(), false)
+		return nil, colNames, fmt.Errorf("%s", err)
 	}
 	flat, ok := valAny.([]any)
 	if !ok {
-		return frankenphp.PHPString("Insert error: values is not an array", false)
+		if _, isMap := phpAssoc(valAny); isMap {
+			// A single associative row: wrap it.
+			flat = []any{valAny}
+		} else {
+			return nil, colNames, fmt.Errorf("values is not an array")
+		}
 	}
 	if len(flat) == 0 {
-		return frankenphp.PHPString("Ok", false)
+		return nil, colNames, nil
 	}
 
-	// Detect format: associative rows, nested sequential rows, or flat
-	asMap := phpAssoc
-
 	var rows [][]any
-	if firstMap, ok := asMap(flat[0]); ok {
+	if firstMap, ok := phpAssoc(flat[0]); ok {
 		// Associative rows: [['id' => 1, 'name' => 'foo'], ...]
 		if len(colNames) == 0 {
+			if !inferCols {
+				return nil, colNames, fmt.Errorf("columns required for associative rows (declare them at batch begin)")
+			}
 			colNames = make([]string, 0, len(firstMap))
 			for k := range firstMap {
 				colNames = append(colNames, k)
@@ -342,9 +363,9 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval, op
 		}
 		rows = make([][]any, len(flat))
 		for j, item := range flat {
-			m, ok := asMap(item)
+			m, ok := phpAssoc(item)
 			if !ok {
-				return frankenphp.PHPString(fmt.Sprintf("Insert error: row %d is not an associative array", j), false)
+				return nil, colNames, fmt.Errorf("row %d is not an associative array", j)
 			}
 			row := make([]any, len(colNames))
 			for ci, col := range colNames {
@@ -354,43 +375,71 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval, op
 		}
 	} else if first, ok := flat[0].([]any); ok {
 		// Nested sequential rows: [[v1, v2], [v3, v4]]
-		if len(colNames) == 0 {
-			return frankenphp.PHPString("Insert error: columns required for sequential arrays", false)
+		if len(colNames) == 0 && requireColsForNested {
+			return nil, colNames, fmt.Errorf("columns required for sequential arrays")
 		}
 		rows = make([][]any, len(flat))
 		rows[0] = first
 		for j := 1; j < len(flat); j++ {
 			row, ok := flat[j].([]any)
 			if !ok {
-				return frankenphp.PHPString(fmt.Sprintf("Insert error: row %d is not an array", j), false)
+				return nil, colNames, fmt.Errorf("row %d is not an array", j)
 			}
 			rows[j] = row
 		}
 	} else {
 		// Flat mode: [v1, v2, v3, v4, v5, v6]
 		if len(colNames) == 0 {
-			return frankenphp.PHPString("Insert error: columns required for flat values", false)
+			return nil, colNames, fmt.Errorf("columns required for flat values")
 		}
 		stride := len(colNames)
 		if len(flat)%stride != 0 {
-			return frankenphp.PHPString(fmt.Sprintf("Insert error: %d values not divisible by %d columns", len(flat), stride), false)
+			return nil, colNames, fmt.Errorf("%d values not divisible by %d columns", len(flat), stride)
 		}
 		rows = make([][]any, len(flat)/stride)
 		for i := 0; i < len(flat); i += stride {
 			rows[i/stride] = flat[i : i+stride]
 		}
 	}
+	return rows, colNames, nil
+}
 
-	// Build INSERT statement with column list — column names are
-	// concatenated into SQL, so validate them like the table name.
-	insertSQL := "INSERT INTO " + tableName
-	if len(colNames) > 0 {
-		for _, col := range colNames {
-			if !validIdent(col) {
-				return frankenphp.PHPString(fmt.Sprintf("Insert error: invalid column name %q", col), false)
-			}
+// appendRows pushes normalized rows into a driver batch.
+func appendRows(batch driver.Batch, rows [][]any, stride int) error {
+	for i, row := range rows {
+		if stride > 0 && len(row) != stride {
+			return fmt.Errorf("row %d has %d values, expected %d columns", i, len(row), stride)
 		}
-		insertSQL += " (" + strings.Join(colNames, ", ") + ")"
+		if err := batch.Append(row...); err != nil {
+			return fmt.Errorf("row %d: %s", i, err)
+		}
+	}
+	return nil
+}
+
+//export clickhouse_insert
+func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval, options *C.zval) unsafe.Pointer {
+	client, err := acquireConn()
+	if err != nil {
+		return frankenphp.PHPString("ERROR: "+err.Error(), false)
+	}
+	defer releaseConn(client)
+	tableName := frankenphp.GoString(unsafe.Pointer(table))
+
+	colNames, err := parseColumnNames(columns)
+	if err != nil {
+		return frankenphp.PHPString("Insert error: "+err.Error(), false)
+	}
+	rows, colNames, err := normalizeRows(values, colNames, true, true)
+	if err != nil {
+		return frankenphp.PHPString("Insert error: "+err.Error(), false)
+	}
+	if len(rows) == 0 {
+		return frankenphp.PHPString("Ok", false)
+	}
+	insertSQL, err := buildInsertSQL(tableName, colNames)
+	if err != nil {
+		return frankenphp.PHPString("Insert error: "+err.Error(), false)
 	}
 
 	ctx, cancel, err := buildCallCtx(options)
@@ -404,14 +453,8 @@ func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval, op
 	}
 	defer batch.Close()
 
-	stride := len(colNames)
-	for i, row := range rows {
-		if stride > 0 && len(row) != stride {
-			return frankenphp.PHPString(fmt.Sprintf("Insert error: row %d has %d values, expected %d columns", i, len(row), stride), false)
-		}
-		if err := batch.Append(row...); err != nil {
-			return frankenphp.PHPString(fmt.Sprintf("Send error (row %d): %s", i, err.Error()), false)
-		}
+	if err := appendRows(batch, rows, len(colNames)); err != nil {
+		return frankenphp.PHPString("Send error: "+err.Error(), false)
 	}
 	if err := batch.Send(); err != nil {
 		return frankenphp.PHPString("Send error: "+err.Error(), false)
@@ -669,6 +712,196 @@ func (p *rowPacker) packRows(rows driver.Rows, max int64) (unsafe.Pointer, bool,
 		}
 	}
 	return result, done, nil
+}
+
+// ── Incremental insert batches ────────────────────────────────────────────────
+
+// batchState is one open incremental insert. The pooled connection is
+// held from begin until send or abort.
+type batchState struct {
+	mu     sync.Mutex
+	conn   clickhouse.Conn
+	batch  driver.Batch
+	cancel context.CancelFunc
+	cols   []string
+	done   bool
+}
+
+var (
+	batchesMu sync.Mutex
+	batches   = map[int64]*batchState{}
+	batchSeq  int64
+)
+
+// releaseResources returns the connection to the pool. Callers must
+// hold b.mu.
+func (b *batchState) releaseResources() {
+	if b.done {
+		return
+	}
+	b.done = true
+	b.cancel()
+	releaseConn(b.conn)
+}
+
+func getBatch(id int64) *batchState {
+	batchesMu.Lock()
+	defer batchesMu.Unlock()
+	return batches[id]
+}
+
+func dropBatch(id int64) {
+	batchesMu.Lock()
+	delete(batches, id)
+	batchesMu.Unlock()
+}
+
+//export clickhouse_batch_begin
+func clickhouse_batch_begin(table *C.zend_string, columns *C.zval, options *C.zval) C.int64_t {
+	client, err := acquireConn()
+	if err != nil {
+		setLastError(err.Error())
+		return -1
+	}
+	tableName := frankenphp.GoString(unsafe.Pointer(table))
+
+	colNames, err := parseColumnNames(columns)
+	if err != nil {
+		releaseConn(client)
+		setLastError(err.Error())
+		return -1
+	}
+	insertSQL, err := buildInsertSQL(tableName, colNames)
+	if err != nil {
+		releaseConn(client)
+		setLastError(err.Error())
+		return -1
+	}
+	// The context must outlive this call — it is cancelled at send/abort.
+	ctx, cancel, err := buildCallCtx(options)
+	if err != nil {
+		releaseConn(client)
+		setLastError(err.Error())
+		return -1
+	}
+	batch, err := client.PrepareBatch(ctx, insertSQL)
+	if err != nil {
+		cancel()
+		releaseConn(client)
+		setLastError(err.Error())
+		return -1
+	}
+
+	b := &batchState{conn: client, batch: batch, cancel: cancel, cols: colNames}
+	batchesMu.Lock()
+	batchSeq++
+	id := batchSeq
+	batches[id] = b
+	batchesMu.Unlock()
+	return C.int64_t(id)
+}
+
+//export clickhouse_batch_append
+func clickhouse_batch_append(id C.int64_t, values *C.zval) unsafe.Pointer {
+	b := getBatch(int64(id))
+	if b == nil {
+		return frankenphp.PHPString(fmt.Sprintf("ERROR: unknown batch %d — already sent, aborted, or never opened", int64(id)), false)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.done {
+		return frankenphp.PHPString(fmt.Sprintf("ERROR: batch %d is closed", int64(id)), false)
+	}
+
+	rows, _, err := normalizeRows(values, b.cols, false, false)
+	if err != nil {
+		return frankenphp.PHPString("ERROR: append: "+err.Error(), false)
+	}
+	if err := appendRows(b.batch, rows, len(b.cols)); err != nil {
+		return frankenphp.PHPString("ERROR: append: "+err.Error(), false)
+	}
+	return frankenphp.PHPString("Ok", false)
+}
+
+//export clickhouse_batch_flush
+func clickhouse_batch_flush(id C.int64_t) unsafe.Pointer {
+	b := getBatch(int64(id))
+	if b == nil {
+		return frankenphp.PHPString(fmt.Sprintf("ERROR: unknown batch %d", int64(id)), false)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.done {
+		return frankenphp.PHPString(fmt.Sprintf("ERROR: batch %d is closed", int64(id)), false)
+	}
+	if err := b.batch.Flush(); err != nil {
+		// A failed flush leaves the stream in an undefined state — close it.
+		b.releaseResources()
+		dropBatch(int64(id))
+		return frankenphp.PHPString("ERROR: flush: "+err.Error(), false)
+	}
+	return frankenphp.PHPString("Ok", false)
+}
+
+//export clickhouse_batch_send
+func clickhouse_batch_send(id C.int64_t) unsafe.Pointer {
+	b := getBatch(int64(id))
+	if b == nil {
+		return frankenphp.PHPString(fmt.Sprintf("ERROR: unknown batch %d", int64(id)), false)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.done {
+		return frankenphp.PHPString(fmt.Sprintf("ERROR: batch %d is closed", int64(id)), false)
+	}
+	err := b.batch.Send()
+	b.releaseResources()
+	dropBatch(int64(id))
+	if err != nil {
+		return frankenphp.PHPString("ERROR: send: "+err.Error(), false)
+	}
+	return frankenphp.PHPString("Ok", false)
+}
+
+//export clickhouse_batch_abort
+func clickhouse_batch_abort(id C.int64_t) unsafe.Pointer {
+	b := getBatch(int64(id))
+	if b == nil {
+		return frankenphp.PHPString(fmt.Sprintf("ERROR: unknown batch %d", int64(id)), false)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.done {
+		return frankenphp.PHPString(fmt.Sprintf("ERROR: batch %d is closed", int64(id)), false)
+	}
+	_ = b.batch.Abort()
+	b.releaseResources()
+	dropBatch(int64(id))
+	return frankenphp.PHPString("Ok", false)
+}
+
+//export clickhouse_async_insert
+func clickhouse_async_insert(query *C.zend_string, wait C.int, params *C.zval, options *C.zval) unsafe.Pointer {
+	client, err := acquireConn()
+	if err != nil {
+		return frankenphp.PHPString("ERROR: "+err.Error(), false)
+	}
+	defer releaseConn(client)
+	queryStr := frankenphp.GoString(unsafe.Pointer(query))
+
+	args, err := buildQueryArgs(params)
+	if err != nil {
+		return frankenphp.PHPString("ERROR: "+err.Error(), false)
+	}
+	ctx, cancel, err := buildCallCtx(options)
+	if err != nil {
+		return frankenphp.PHPString("ERROR: "+err.Error(), false)
+	}
+	defer cancel()
+	if err := client.AsyncInsert(ctx, queryStr, wait != 0, args...); err != nil {
+		return frankenphp.PHPString("ERROR: async insert: "+err.Error(), false)
+	}
+	return frankenphp.PHPString("Ok", false)
 }
 
 // ── Streaming cursors ─────────────────────────────────────────────────────────

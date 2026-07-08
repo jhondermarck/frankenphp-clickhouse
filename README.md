@@ -91,6 +91,12 @@ clickhouse_cursor_fetch(int $cursor, int $max_rows = 10000): array
 clickhouse_cursor_close(int $cursor): string
 clickhouse_exec(string $query, ?array $params = null, ?array $options = null): string
 clickhouse_insert(string $table, array $values, ?array $columns = null, ?array $options = null): string
+clickhouse_batch_begin(string $table, ?array $columns = null, ?array $options = null): int
+clickhouse_batch_append(int $batch, array $values): string
+clickhouse_batch_flush(int $batch): string
+clickhouse_batch_send(int $batch): string
+clickhouse_batch_abort(int $batch): string
+clickhouse_async_insert(string $query, bool $wait = true, ?array $params = null, ?array $options = null): string
 clickhouse_ping(): string
 clickhouse_server_version(): string
 clickhouse_disconnect(): string
@@ -116,6 +122,43 @@ $rows = clickhouse_query_array($sql, null, [
 
 // Kill it from another connection if needed
 clickhouse_exec("KILL QUERY WHERE query_id = {id:String}", ['id' => "report-$jobId"]);
+```
+
+### Incremental batches (unbounded-size writes)
+
+`clickhouse_insert` needs the whole payload in one PHP array. Batch handles
+stream instead: append chunks as you produce them, `flush` ships buffered
+rows to the server (memory stays bounded on both sides), `send` finalizes.
+The pooled connection is held from `begin` to `send`/`abort`.
+
+```php
+$batch = clickhouse_batch_begin('events', ['id', 'start', 'type']);
+foreach ($bigSource as $i => $row) {
+    clickhouse_batch_append($batch, [$row]);        // nested/assoc/flat, same formats as insert
+    if ($i % 10_000 === 0) {
+        clickhouse_batch_flush($batch);             // ship buffered rows, keep going
+    }
+}
+clickhouse_batch_send($batch);                      // or clickhouse_batch_abort($batch)
+```
+
+Notes: rows appended but never flushed are discarded by `abort`; flushed
+rows are already on the server. Flat values and associative rows require
+`$columns` at `begin` (the INSERT statement is fixed there); nested rows
+without columns follow the table's DDL order.
+
+### Async inserts (high-frequency small writes)
+
+For many small inserts where client-side batching isn't practical, let the
+server buffer them ([async inserts](https://clickhouse.com/docs/optimize/asynchronous-inserts)):
+
+```php
+// wait=true (default): returns once the server flushed the buffer — durable
+clickhouse_async_insert("INSERT INTO events VALUES ({id:UUID}, {t:DateTime}, {ty:UInt8})",
+    true, ['id' => $id, 't' => $t, 'ty' => $type]);
+
+// wait=false: fire-and-forget (accept possible loss on server crash)
+clickhouse_async_insert("INSERT INTO metrics VALUES (now(), 1)", false);
 ```
 
 All functions throw `RuntimeException` on error. The exception message contains the ClickHouse error detail.

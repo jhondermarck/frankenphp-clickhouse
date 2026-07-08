@@ -1025,6 +1025,105 @@ try {
 ok($threw, 'cursor honours per-call settings');
 
 // =============================================================================
+// Incremental batch — begin / append / flush / send / abort
+// =============================================================================
+
+suite('Incremental batch');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_batch_test");
+clickhouse_exec("CREATE TABLE clickhousephp_batch_test (n UInt32, label String) ENGINE = Memory");
+
+$b = clickhouse_batch_begin('clickhousephp_batch_test', ['n', 'label']);
+ok(is_int($b), 'batch_begin returns int handle');
+eq(clickhouse_batch_append($b, [[1, 'a'], [2, 'b']]), 'Ok', 'append nested rows');
+eq(clickhouse_batch_append($b, [3, 'c', 4, 'd']), 'Ok', 'append flat values');
+eq(clickhouse_batch_append($b, [['n' => 5, 'label' => 'e']]), 'Ok', 'append assoc row');
+eq(clickhouse_batch_flush($b), 'Ok', 'flush mid-stream');
+eq(clickhouse_batch_append($b, [[6, 'f']]), 'Ok', 'append after flush');
+eq(clickhouse_batch_send($b), 'Ok', 'send');
+
+$rows = clickhouse_query_array("SELECT count() AS c, sum(n) AS s FROM clickhousephp_batch_test");
+eq($rows[0]['c'], 6, 'all chunks landed');
+eq($rows[0]['s'], 21, 'values correct across formats');
+
+$threw = false;
+try {
+    clickhouse_batch_append($b, [[7, 'g']]);
+} catch (RuntimeException $e) {
+    $threw = true;
+}
+ok($threw, 'append after send throws');
+
+// Abort without flush discards everything
+clickhouse_exec("TRUNCATE TABLE clickhousephp_batch_test");
+$b = clickhouse_batch_begin('clickhousephp_batch_test', ['n', 'label']);
+clickhouse_batch_append($b, [[10, 'x'], [11, 'y']]);
+eq(clickhouse_batch_abort($b), 'Ok', 'abort returns Ok');
+$rows = clickhouse_query_array("SELECT count() AS c FROM clickhousephp_batch_test");
+eq($rows[0]['c'], 0, 'abort without flush discards rows');
+$rows = clickhouse_query_array("SELECT 1 AS one");
+eq($rows[0]['one'], 1, 'pool healthy after abort');
+
+// No columns at begin: nested rows in DDL order work; flat values don't
+$b = clickhouse_batch_begin('clickhousephp_batch_test');
+eq(clickhouse_batch_append($b, [[20, 'z']]), 'Ok', 'append without columns (DDL order)');
+eq(clickhouse_batch_send($b), 'Ok', 'send without columns');
+$rows = clickhouse_query_array("SELECT n, label FROM clickhousephp_batch_test");
+eq($rows[0]['n'], 20, 'row landed');
+
+$b = clickhouse_batch_begin('clickhousephp_batch_test');
+$threw = false;
+try {
+    clickhouse_batch_append($b, [21, 'w']);
+} catch (RuntimeException $e) {
+    $threw = true;
+}
+ok($threw, 'flat append without columns throws');
+clickhouse_batch_abort($b);
+
+$threw = false;
+try {
+    clickhouse_batch_send(999999);
+} catch (RuntimeException $e) {
+    $threw = true;
+}
+ok($threw, 'unknown batch handle throws');
+
+$threw = false;
+try {
+    clickhouse_batch_begin('bad; DROP x');
+} catch (RuntimeException $e) {
+    $threw = true;
+}
+ok($threw, 'invalid table at batch_begin throws');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_batch_test");
+
+// =============================================================================
+// Async insert
+// =============================================================================
+
+suite('Async insert');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_async_test");
+clickhouse_exec("CREATE TABLE clickhousephp_async_test (n UInt32) ENGINE = MergeTree() ORDER BY n");
+
+eq(clickhouse_async_insert("INSERT INTO clickhousephp_async_test VALUES (1), (2)", true), 'Ok', 'async insert wait=true');
+$rows = clickhouse_query_array("SELECT count() AS c FROM clickhousephp_async_test");
+eq($rows[0]['c'], 2, 'rows durable after wait=true');
+
+eq(clickhouse_async_insert("INSERT INTO clickhousephp_async_test VALUES ({v:UInt32})", true, ['v' => 3]), 'Ok', 'async insert with params');
+$rows = clickhouse_query_array("SELECT count() AS c FROM clickhousephp_async_test");
+eq($rows[0]['c'], 3, 'param row visible');
+
+eq(clickhouse_async_insert("INSERT INTO clickhousephp_async_test VALUES (4)", false), 'Ok', 'async insert wait=false returns immediately');
+clickhouse_exec("SYSTEM FLUSH ASYNC INSERT QUEUE");
+$rows = clickhouse_query_array("SELECT count() AS c FROM clickhousephp_async_test");
+eq($rows[0]['c'], 4, 'wait=false row visible after queue flush');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_async_test");
+
+// =============================================================================
 // Cleanup
 // =============================================================================
 

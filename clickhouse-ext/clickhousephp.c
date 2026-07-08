@@ -192,3 +192,94 @@ PHP_FUNCTION(clickhouse_server_version)
     if (result) { RETURN_STR(result); }
     RETURN_EMPTY_STRING();
 }
+
+PHP_FUNCTION(clickhouse_batch_begin)
+{
+    zend_string *table = NULL;
+    zval *columns = NULL;
+    zval *options = NULL;
+    ZEND_PARSE_PARAMETERS_START(1, 3)
+        Z_PARAM_STR(table)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY_OR_NULL(columns)
+        Z_PARAM_ARRAY_OR_NULL(options)
+    ZEND_PARSE_PARAMETERS_END();
+    int64_t id = clickhouse_batch_begin(table, columns, options);
+    if (id < 0) {
+        zend_string *err = clickhouse_get_last_error();
+        const char *msg = err ? ZSTR_VAL(err) : "ClickHouse batch open failed";
+        zend_throw_exception(spl_ce_RuntimeException, msg, 0);
+        if (err) { zend_string_release(err); }
+        RETURN_THROWS();
+    }
+    RETURN_LONG((zend_long)id);
+}
+
+PHP_FUNCTION(clickhouse_batch_append)
+{
+    zend_long id = 0;
+    zval *values = NULL;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_LONG(id)
+        Z_PARAM_ARRAY(values)
+    ZEND_PARSE_PARAMETERS_END();
+    zend_string *result = clickhouse_batch_append((int64_t)id, values);
+    if (ch_throw_on_error(result)) { RETURN_THROWS(); }
+    if (result) { RETURN_STR(result); }
+    RETURN_EMPTY_STRING();
+}
+
+PHP_FUNCTION(clickhouse_batch_flush)
+{
+    zend_long id = 0;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(id)
+    ZEND_PARSE_PARAMETERS_END();
+    zend_string *result = clickhouse_batch_flush((int64_t)id);
+    if (ch_throw_on_error(result)) { RETURN_THROWS(); }
+    if (result) { RETURN_STR(result); }
+    RETURN_EMPTY_STRING();
+}
+
+PHP_FUNCTION(clickhouse_batch_send)
+{
+    zend_long id = 0;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(id)
+    ZEND_PARSE_PARAMETERS_END();
+    zend_string *result = clickhouse_batch_send((int64_t)id);
+    if (ch_throw_on_error(result)) { RETURN_THROWS(); }
+    if (result) { RETURN_STR(result); }
+    RETURN_EMPTY_STRING();
+}
+
+PHP_FUNCTION(clickhouse_batch_abort)
+{
+    zend_long id = 0;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(id)
+    ZEND_PARSE_PARAMETERS_END();
+    zend_string *result = clickhouse_batch_abort((int64_t)id);
+    if (ch_throw_on_error(result)) { RETURN_THROWS(); }
+    if (result) { RETURN_STR(result); }
+    RETURN_EMPTY_STRING();
+}
+
+PHP_FUNCTION(clickhouse_async_insert)
+{
+    zend_string *query = NULL;
+    bool wait = 1;
+    zval *params = NULL;
+    zval *options = NULL;
+    ZEND_PARSE_PARAMETERS_START(1, 4)
+        Z_PARAM_STR(query)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_BOOL(wait)
+        Z_PARAM_ARRAY_OR_NULL(params)
+        Z_PARAM_ARRAY_OR_NULL(options)
+    ZEND_PARSE_PARAMETERS_END();
+    zend_string *result = clickhouse_async_insert(query, wait ? 1 : 0, params, options);
+    if (ch_throw_on_error(result)) { RETURN_THROWS(); }
+    if (result) { RETURN_STR(result); }
+    RETURN_EMPTY_STRING();
+}

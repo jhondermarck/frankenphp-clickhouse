@@ -25,3 +25,15 @@ function clickhouse_cursor_close(int $cursor): string {}
 function clickhouse_ping(): string {}
 
 function clickhouse_server_version(): string {}
+
+function clickhouse_batch_begin(string $table, ?array $columns = null, ?array $options = null): int {}
+
+function clickhouse_batch_append(int $batch, array $values): string {}
+
+function clickhouse_batch_flush(int $batch): string {}
+
+function clickhouse_batch_send(int $batch): string {}
+
+function clickhouse_batch_abort(int $batch): string {}
+
+function clickhouse_async_insert(string $query, bool $wait = true, ?array $params = null, ?array $options = null): string {}

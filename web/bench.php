@@ -188,6 +188,24 @@ $goIns = benchGo($dsn, function () use ($benchTable, $insertFlat, $insertCols, $
 });
 printInsertRow('Go TCP + clickhouse_insert (batch)', $goIns, $insertRows, $insRef);
 
+// ── 3. Go TCP + batch handle (streaming, chunks de 10k + flush) ──────────────
+$goBatchIns = benchGo($dsn, function () use ($benchTable, $insertNested, $insertCols, $insertRows) {
+    clickhouse_exec("TRUNCATE TABLE $benchTable");
+    $b = clickhouse_batch_begin($benchTable, $insertCols);
+    foreach (array_chunk($insertNested, 10000) as $chunk) {
+        clickhouse_batch_append($b, $chunk);
+        clickhouse_batch_flush($b);
+    }
+    clickhouse_batch_send($b);
+    $rows = clickhouse_query_array("SELECT count() AS c FROM $benchTable");
+    $cnt = (int)($rows[0]['c'] ?? 0);
+    if ($cnt !== $insertRows) {
+        throw new \RuntimeException("Batch insert: expected $insertRows rows, got $cnt");
+    }
+    return null;
+});
+printInsertRow('Go TCP + batch handle (10k chunks + flush)', $goBatchIns, $insertRows, $insRef);
+
 // ── INSERT résumé ────────────────────────────────────────────────────────────
 separator();
 
