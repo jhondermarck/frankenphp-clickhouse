@@ -1,38 +1,80 @@
-# Migration Guide: smi2/phpclickhouse -> frankenphp-clickhouse native extension
+# Migration Guide: smi2/phpclickhouse → frankenphp-clickhouse native extension
 
-> **Pour agents IA** : Ce document est la reference pour migrer un projet Laravel de `smi2/phpclickhouse` (client HTTP, port 8123) vers l'extension native Go compilee dans FrankenPHP (protocole natif, port 9000).
+> **Pour agents IA** : Ce document est la référence pour migrer un projet Laravel de `smi2/phpclickhouse` (client HTTP, port 8123) vers l'extension native Go compilée dans FrankenPHP (protocole natif TCP, port 9000).
 
 ## Vue d'ensemble
 
 | | smi2/phpclickhouse | Extension native |
 |---|---|---|
 | Protocole | HTTP (port 8123) | Natif TCP (port 9000) |
-| Serialisation | JSON (`json_decode`) | Construction directe de zend_array en C |
-| Perf SELECT 100k | ~0.394s | ~0.046s (**x8.5**) |
-| Perf INSERT 100k | ~0.496s | ~0.172s (**x2.9**) |
+| Sérialisation | JSON (`json_decode`) | Construction directe de `zend_array` en C |
+| Perf SELECT 100k | ~0.34s (réf) | ~0.038s (**×8.5**) |
+| Perf INSERT 100k | ~0.45s (réf) | ~0.144s (**×3.1**) |
+| Streaming | non | curseur borné-mémoire (`+6 Mo` vs `+498 Mo` à 1M lignes) |
+| Batch incrémental | non | `batch_begin/append/flush/send` |
 | Binaire PHP | `php` | `frankenphp php-cli` |
-| Dependance | Composer (`smi2/phpclickhouse`) | Compilee dans le binaire FrankenPHP |
+| Dépendance | Composer (`smi2/phpclickhouse`) | Compilée dans le binaire FrankenPHP |
 
-## API de l'extension
+Chiffres de perf : voir le `README.md` (banc `web/bench.php`).
+
+---
+
+## API de l'extension (20 fonctions)
+
+Toutes les fonctions lèvent `RuntimeException` en cas d'erreur ClickHouse. Le
+code d'erreur serveur ClickHouse est disponible via `$e->getCode()` (0 pour les
+erreurs côté client).
+
+### Connexion
 
 ```php
-// Connexion (DSN natif, port 9000)
-clickhouse_connect(string $dsn): string
-
-// Requetes SELECT -> tableau PHP natif
-clickhouse_query_array(string $query, ?array $params = null): array
-
-// DDL/DML sans resultat
-clickhouse_exec(string $query, ?array $params = null): string
-
-// INSERT batch performant
-clickhouse_insert(string $table, array $values, ?array $columns = null): string
-
-// Deconnexion
+clickhouse_connect(string $dsn): string          // pool par défaut (implicite)
 clickhouse_disconnect(): string
+clickhouse_open(string $dsn): int                 // pool nommé additionnel → handle
+clickhouse_close(int $connection): string
+clickhouse_ping(?int $connection = null): string
+clickhouse_server_version(?int $connection = null): string
 ```
 
-Toutes les fonctions lancent `RuntimeException` en cas d'erreur.
+### Lecture
+
+```php
+clickhouse_query_array(string $query, ?array $params = null, ?array $options = null): array
+clickhouse_query_cursor(string $query, ?array $params = null, ?array $options = null): int
+clickhouse_cursor_fetch(int $cursor, int $max_rows = 10000): array
+clickhouse_cursor_close(int $cursor): string
+```
+
+### Écriture
+
+```php
+clickhouse_exec(string $query, ?array $params = null, ?array $options = null): string
+clickhouse_insert(string $table, array $values, ?array $columns = null, ?array $options = null): string
+clickhouse_async_insert(string $query, bool $wait = true, ?array $params = null, ?array $options = null): string
+
+// Batch incrémental (mémoire bornée, connexion tenue le temps du batch)
+clickhouse_batch_begin(string $table, ?array $columns = null, ?array $options = null): int
+clickhouse_batch_append(int $batch, array $values): string
+clickhouse_batch_flush(int $batch): string        // envoie les lignes accumulées, garde le batch ouvert
+clickhouse_batch_send(int $batch): string         // flush final + ferme
+clickhouse_batch_abort(int $batch): string        // jette tout
+```
+
+### Options par requête (`$options`)
+
+Clé | Effet
+----|------
+`settings` | tableau assoc de settings ClickHouse (`['max_threads' => 1, 'max_result_rows' => 5]`)
+`query_id` | identifiant de requête propagé au serveur
+`timeout` | timeout de cette requête (`'200ms'`, `'30s'`) — surcharge celui du DSN
+`connection` | handle de `clickhouse_open()` à utiliser au lieu du pool par défaut
+
+Toute clé inconnue lève une exception (protection contre les fautes de frappe).
+
+> **Handles et timeout DSN** : un `timeout` dans le DSN s'applique aux requêtes
+> unitaires (`query_array`/`exec`/`insert`) mais **pas** aux curseurs ni aux
+> batches — leur contexte couvre toute la durée de vie du handle. Pour borner un
+> curseur, passez `['timeout' => '…']` explicitement à `query_cursor`.
 
 ---
 
@@ -51,7 +93,6 @@ $client = new \ClickHouseDB\Client([
 ]);
 $client->database(config('clickhouse.options.database'));
 $client->setTimeout(50);
-$client->setConnectTimeOut(5);
 $client->enableHttpCompression(true);
 ```
 
@@ -59,182 +100,197 @@ $client->enableHttpCompression(true);
 ```php
 $dsn = sprintf(
     'clickhouse://%s:%s@%s:%s/%s?secure=%s',
-    config('clickhouse.credentials.username'),
-    config('clickhouse.credentials.password'),
-    config('clickhouse.credentials.host'),
-    config('clickhouse.credentials.port'),         // 9000 (natif)
-    config('clickhouse.options.database'),
-    config('clickhouse.credentials.https') ? 'true' : 'false'
+    $creds['username'], $creds['password'],
+    $creds['host'], $creds['port'],          // 9000 (natif)
+    $database, $https ? 'true' : 'false'
 );
 clickhouse_connect($dsn);
 ```
 
-> **IMPORTANT** : Le port change de `8123` (HTTP) a `9000` (natif). En Docker, le service ClickHouse expose deja les deux ports. Il faut ajouter/modifier la config pour utiliser le port natif.
+Le DSN accepte les paramètres du driver clickhouse-go (multi-hôtes,
+`connection_open_strategy`, `max_open_conns`, `max_idle_conns`,
+`conn_max_lifetime`, `compress=zstd`, …). Tout paramètre inconnu du driver est
+transmis comme setting ClickHouse. Les paramètres `timeout`, `ca_cert`,
+`client_cert`, `client_key` sont propres à l'extension (TLS mutuel).
+
+> **IMPORTANT** : le port passe de `8123` (HTTP) à `9000` (natif). Compression
+> LZ4 par défaut (`compress=zstd` pour zstd).
 
 ### 2. SELECT avec bindings
 
 **smi2 :**
 ```php
-// smi2 utilise la syntaxe :paramName
 $stmt = $client->select(
     'SELECT * FROM events WHERE tenant_id = :tenantId AND id = :id',
     ['tenantId' => $tenantId, 'id' => $eventId]
 );
-$rows = $stmt->rows();
+$rows  = $stmt->rows();
 $value = $stmt->fetchOne('column_name');
-$count = $stmt->fetchOne('count');
 ```
 
 **Extension native :**
 ```php
-// L'extension utilise la syntaxe ClickHouse native {param:Type}
+// Syntaxe ClickHouse native {param:Type}
 $rows = clickhouse_query_array(
     'SELECT * FROM events WHERE tenant_id = {tenantId:String} AND id = {id:String}',
     ['tenantId' => $tenantId, 'id' => $eventId]
 );
-// $rows est directement un array de rows associatifs
-$firstRow = $rows[0] ?? null;          // equivalent de fetchOne() sur la row
-$value = $rows[0]['column_name'];      // equivalent de fetchOne('column_name')
-$count = $rows[0]['count'];            // equivalent de fetchOne('count')
+$value = $rows[0]['column_name'] ?? null;    // équivalent fetchOne('column_name')
+$count = count($rows);
 ```
 
-**Differences critiques des bindings :**
+**Différences des bindings :**
 
 | smi2 | Extension native | Notes |
 |------|-----------------|-------|
-| `:paramName` | `{paramName:Type}` | Le type ClickHouse est requis |
-| `:tenantId` | `{tenantId:String}` | |
-| `:count` | `{count:UInt64}` | |
-| `:startDate` | `{startDate:DateTime}` | |
-| `IN (:values)` | Non supporte directement | Construire la clause IN manuellement |
+| `:paramName` | `{paramName:Type}` | le type ClickHouse est requis |
+| `IN (:values)` | `IN {values:Array(String)}` | **supporté** : passer un tableau PHP en paramètre |
 
-**Types ClickHouse courants pour les bindings :**
-- `String` — pour les strings et UUIDs
-- `UInt32`, `UInt64`, `Int32`, `Int64` — pour les entiers
-- `Float64` — pour les decimaux
-- `DateTime`, `DateTime64` — pour les dates
-- `Date` — pour les dates sans heure
+Types courants : `String`, `UInt32/UInt64/Int32/Int64`, `Float64`,
+`DateTime`, `DateTime64`, `Date`, `UUID`, `Array(String)`, …
 
-### 3. INSERT
+### 3. Gros SELECT → curseur streaming
+
+Pour les résultats volumineux, `clickhouse_query_array` matérialise tout en
+mémoire. Le curseur lit par paquets bornés :
+
+```php
+$cur = clickhouse_query_cursor("SELECT * FROM big_table", $params, $options);
+while (($chunk = clickhouse_cursor_fetch($cur, 10000)) && count($chunk) > 0) {
+    foreach ($chunk as $row) { /* … */ }
+}
+clickhouse_cursor_close($cur);   // TOUJOURS fermer (voir « Points d'attention »)
+```
+
+### 4. INSERT
 
 **smi2 :**
 ```php
-// smi2 attend des rows imbriquees + colonnes separees
 $client->insert('events', [
-    [$id, $tenantId, $start, $end, $machineId],
-    [$id2, $tenantId2, $start2, $end2, $machineId2],
-], ['id', 'tenant_id', 'start', 'end', 'machine_id']);
+    [$id, $tenantId, $start],
+    [$id2, $tenantId2, $start2],
+], ['id', 'tenant_id', 'start']);
 ```
 
-**Extension native — 3 formats supportes :**
+**Extension native — 3 formats supportés :**
 
 ```php
-// Format 1 : Rows imbriquees (comme smi2) ✅ RECOMMANDE pour migration
+// Format 1 : rows imbriquées (comme smi2) ✅ RECOMMANDÉ pour migration
 clickhouse_insert('events', [
-    [$id, $tenantId, $start, $end, $machineId],
-    [$id2, $tenantId2, $start2, $end2, $machineId2],
-], ['id', 'tenant_id', 'start', 'end', 'machine_id']);
+    [$id, $tenantId, $start],
+    [$id2, $tenantId2, $start2],
+], ['id', 'tenant_id', 'start']);
 
-// Format 2 : Tableaux associatifs (colonnes inferees des cles)
+// Format 2 : tableaux associatifs (colonnes inférées des clés)
 clickhouse_insert('events', [
     ['id' => $id, 'tenant_id' => $tenantId, 'start' => $start],
-    ['id' => $id2, 'tenant_id' => $tenantId2, 'start' => $start2],
 ]);
 
-// Format 3 : Flat array (valeurs a plat)
-clickhouse_insert('events',
-    [$id, $tenantId, $start, $id2, $tenantId2, $start2],
-    ['id', 'tenant_id', 'start']
+// Format 3 : flat array (valeurs à plat, colonnes obligatoires)
+clickhouse_insert('events', [$id, $tenantId, $start], ['id', 'tenant_id', 'start']);
+```
+
+Les colonnes `Map(K,V)` acceptent des tableaux associatifs PHP, et les colonnes
+`Array(T)` (y compris imbriquées) des listes PHP :
+
+```php
+clickhouse_insert('events', [[
+    'id'     => $id,
+    'labels' => ['env' => 'prod', 'region' => 'eu'],   // Map(String, String)
+    'tags'   => ['a', 'b'],                             // Array(String)
+]], ['id', 'labels', 'tags']);
+```
+
+> **Colonnes partielles** : les colonnes non fournies prennent leur DEFAULT.
+
+### 5. Batch incrémental (remplace les gros `insert()` en mémoire)
+
+Là où `clickhouse_insert` exige tout le payload en un seul tableau PHP, le batch
+tient la connexion et accumule par paquets — mémoire bornée pour des millions de
+lignes :
+
+```php
+$b = clickhouse_batch_begin('events', ['id', 'tenant_id', 'start']);
+foreach ($chunks as $rows) {
+    clickhouse_batch_append($b, $rows);   // mêmes formats que insert
+    clickhouse_batch_flush($b);           // optionnel : envoie et garde ouvert
+}
+clickhouse_batch_send($b);                // flush final + ferme
+// en cas d'erreur applicative : clickhouse_batch_abort($b);
+```
+
+### 6. Async insert (petites écritures haute fréquence)
+
+```php
+clickhouse_async_insert(
+    "INSERT INTO events VALUES ({id:UUID}, {t:DateTime})",
+    true,                                  // wait_for_async_insert
+    ['id' => $id, 't' => $now]
 );
 ```
 
-> **Colonnes partielles** : L'extension supporte les inserts avec un sous-ensemble de colonnes. Les colonnes manquantes utilisent leur valeur DEFAULT.
-
-### 4. WRITE / EXEC (DDL, TRUNCATE, DELETE)
+### 7. WRITE / EXEC (DDL, TRUNCATE, DELETE)
 
 **smi2 :**
 ```php
-$client->write('TRUNCATE TABLE IF EXISTS {table}', ['table' => $tableName]);
-$client->write('CREATE TABLE IF NOT EXISTS ...');
+$client->write('TRUNCATE TABLE IF EXISTS ' . $tableName);
 $client->write('DELETE FROM events WHERE id = :id', ['id' => $id]);
 ```
 
 **Extension native :**
 ```php
-// Sans bindings
 clickhouse_exec('TRUNCATE TABLE IF EXISTS ' . $tableName);
-clickhouse_exec('CREATE TABLE IF NOT EXISTS ...');
-
-// Avec bindings (syntaxe ClickHouse native)
-clickhouse_exec(
-    'DELETE FROM events WHERE id = {id:String}',
-    ['id' => $id]
-);
+clickhouse_exec('DELETE FROM events WHERE id = {id:String}', ['id' => $id]);
 ```
 
-> **Note** : smi2 supporte les bindings de noms de tables (`{table}`). L'extension native ne fait pas de substitution — utiliser la concatenation PHP pour les noms de tables (pas de risque d'injection car ce sont des constantes cote code).
+> smi2 substitue les noms de tables (`{table}`). L'extension ne substitue pas les
+> identifiants — concaténer en PHP (constantes côté code, pas d'injection).
 
-### 5. Resultats
+### 8. Résultats
 
-**smi2 retourne un objet `Statement` :**
-```php
-$stmt = $client->select('SELECT ...');
-$stmt->rows();              // array de rows associatifs
-$stmt->fetchOne('col');     // valeur d'une colonne de la 1ere row
-$stmt->fetchOne();          // 1ere valeur de la 1ere row
-$stmt->count();             // nombre de rows
-```
+`smi2` retourne un objet `Statement` ; l'extension retourne directement un
+`array` de rows associatifs :
 
-**L'extension retourne directement un `array` :**
 ```php
 $rows = clickhouse_query_array('SELECT ...');
-// $rows = [['col1' => val, 'col2' => val, ...], ...]
-
-count($rows);                        // nombre de rows
-$rows[0]['col'] ?? null;             // equivalent fetchOne('col')
-$rows[0][array_key_first($rows[0])]; // equivalent fetchOne() sans arg
+count($rows);                // $stmt->count()
+$rows[0]['col'] ?? null;     // $stmt->fetchOne('col')
 ```
 
-### 6. Gestion d'erreurs
+### 9. Gestion d'erreurs
 
-**smi2 :**
 ```php
-use ClickHouseDB\Exception\DatabaseException;
+use ClickHouseDB\Exception\DatabaseException;   // smi2
 
-try {
-    $stmt = $client->select('...');
-} catch (DatabaseException $e) {
-    // Erreur ClickHouse
-}
-```
-
-**Extension native :**
-```php
 try {
     $rows = clickhouse_query_array('...');
-} catch (RuntimeException $e) {
-    // $e->getMessage() contient le detail de l'erreur ClickHouse
-    // Ex: "code: 60, message: Table default.events doesn't exist"
+} catch (RuntimeException $e) {                 // extension native
+    $e->getMessage();   // "Table default.events doesn't exist"
+    $e->getCode();      // code serveur ClickHouse (60, 62, …) ; 0 = erreur client
 }
 ```
 
-> Remplacer `DatabaseException` par `RuntimeException` partout.
+> Remplacer `DatabaseException` par `RuntimeException` partout. `getCode()` porte
+> désormais le code d'erreur ClickHouse.
 
-### 7. Format des dates
+### 10. Format des dates
 
-**smi2 (HTTP)** retourne les dates au format ClickHouse standard :
-```
-2024-01-15 08:00:00
-2024-01-15 08:00:00.123456
-```
-
-**L'extension native** retourne le meme format :
+Identique à smi2 — pas de changement de parsing :
 ```
 2024-01-15 08:00:00           // DateTime
 2024-01-15 08:00:00.123456    // DateTime64(6)
 ```
 
-Pas de changement necessaire dans le code applicatif pour le parsing des dates.
+### 11. Plusieurs bases / clusters
+
+`clickhouse_connect` établit le pool par défaut (utilisé implicitement). Pour un
+second cluster, `clickhouse_open` renvoie un handle passé via `['connection' => $h]` :
+
+```php
+$analytics = clickhouse_open($analyticsDsn);
+$rows = clickhouse_query_array('SELECT …', null, ['connection' => $analytics]);
+clickhouse_close($analytics);
+```
 
 ---
 
@@ -242,13 +298,11 @@ Pas de changement necessaire dans le code applicatif pour le parsing des dates.
 
 ### Architecture cible
 
-Creer un service `NativeClickhouseClientService` qui remplace `ClickhouseClientService` avec la meme interface publique :
-
 ```
 app/Services/Clickhouse/
-├── ClickhouseClientInterface.php    # Interface commune (nouveau)
-├── ClickhouseClientService.php      # Implementation smi2 (existant, garde pour fallback)
-└── NativeClickhouseClientService.php # Implementation native (nouveau)
+├── ClickhouseClientInterface.php     # interface commune (nouveau)
+├── ClickhouseClientService.php       # implémentation smi2 (gardée pour fallback)
+└── NativeClickhouseClientService.php # implémentation native (nouveau)
 ```
 
 ### Interface commune
@@ -267,7 +321,7 @@ interface ClickhouseClientInterface
 }
 ```
 
-### Implementation native
+### Implémentation native
 
 ```php
 <?php
@@ -305,10 +359,7 @@ class NativeClickhouseClientService implements ClickhouseClientInterface
     }
 
     /**
-     * SELECT avec conversion automatique des bindings smi2 -> natif.
-     *
-     * Supporte la syntaxe :paramName (comme smi2) en la convertissant
-     * vers {paramName:String} pour le protocole natif.
+     * SELECT avec conversion automatique des bindings smi2 → natif.
      */
     public static function select(string $sql, array $bindings = []): array
     {
@@ -316,7 +367,6 @@ class NativeClickhouseClientService implements ClickhouseClientInterface
             return clickhouse_query_array($sql);
         }
 
-        // Conversion des bindings smi2 (:param) -> natif ({param:String})
         [$nativeSql, $nativeBindings] = self::convertBindings($sql, $bindings);
 
         return clickhouse_query_array($nativeSql, $nativeBindings);
@@ -328,11 +378,9 @@ class NativeClickhouseClientService implements ClickhouseClientInterface
             return;
         }
 
-        if (empty($columns)) {
-            clickhouse_insert($table, $values);
-        } else {
-            clickhouse_insert($table, $values, $columns);
-        }
+        empty($columns)
+            ? clickhouse_insert($table, $values)
+            : clickhouse_insert($table, $values, $columns);
     }
 
     public static function write(string $sql, array $bindings = []): void
@@ -342,11 +390,9 @@ class NativeClickhouseClientService implements ClickhouseClientInterface
             return;
         }
 
-        // Pour write(), les bindings smi2 incluent souvent des noms de tables
-        // qu'on ne peut pas parametriser avec le protocole natif.
-        // On fait une substitution directe pour les identifiants.
-        $resolved = self::resolveIdentifierBindings($sql, $bindings);
-        clickhouse_exec($resolved);
+        // Les bindings smi2 de write() incluent souvent des noms de tables
+        // qu'on ne peut pas paramétrer avec le protocole natif → substitution.
+        clickhouse_exec(self::resolveIdentifierBindings($sql, $bindings));
     }
 
     public static function truncate(string $table): void
@@ -359,13 +405,10 @@ class NativeClickhouseClientService implements ClickhouseClientInterface
     /**
      * Convertit les bindings smi2 (:param) vers le format natif ({param:Type}).
      *
-     * Infere le type ClickHouse depuis le type PHP de la valeur :
-     * - string -> String
-     * - int    -> Int64
-     * - float  -> Float64
-     * - bool   -> UInt8
-     * - null   -> pas de binding (remplace par 'NULL' dans la query)
-     * - array  -> non supporte (construire la clause manuellement)
+     * - string  → String        - null  → 'NULL' inliné
+     * - int     → Int64          - array → {param:Array(String)} (IN supporté)
+     * - float   → Float64
+     * - bool    → UInt8
      */
     private static function convertBindings(string $sql, array $bindings): array
     {
@@ -373,23 +416,22 @@ class NativeClickhouseClientService implements ClickhouseClientInterface
 
         foreach ($bindings as $key => $value) {
             if ($value === null) {
-                // Remplacer :key par NULL directement
                 $sql = str_replace(':' . $key, 'NULL', $sql);
                 continue;
             }
 
             if (is_array($value)) {
-                // IN (:values) -> IN ('v1','v2','v3')
-                $escaped = array_map(fn($v) => "'" . addslashes((string)$v) . "'", $value);
-                $sql = str_replace(':' . $key, implode(',', $escaped), $sql);
+                // IN (:values) → IN {values:Array(String)} (binding natif)
+                $sql = str_replace(':' . $key, '{' . $key . ':Array(String)}', $sql);
+                $nativeBindings[$key] = array_map('strval', $value);
                 continue;
             }
 
             $chType = match (true) {
-                is_int($value)    => 'Int64',
-                is_float($value)  => 'Float64',
-                is_bool($value)   => 'UInt8',
-                default           => 'String',
+                is_int($value)   => 'Int64',
+                is_float($value) => 'Float64',
+                is_bool($value)  => 'UInt8',
+                default          => 'String',
             };
 
             $sql = str_replace(':' . $key, '{' . $key . ':' . $chType . '}', $sql);
@@ -400,14 +442,12 @@ class NativeClickhouseClientService implements ClickhouseClientInterface
     }
 
     /**
-     * Remplace les bindings d'identifiants ({table}, {fieldName}) par substitution directe.
-     * Utilise pour write() ou les noms de tables/colonnes sont passes en binding.
+     * Substitution directe des identifiants ({table}) pour write().
      */
-    private static function resolveIdentifierBindings(string $sql, array $bindings): array
+    private static function resolveIdentifierBindings(string $sql, array $bindings): string
     {
         foreach ($bindings as $key => $value) {
-            $sql = str_replace('{' . $key . '}', (string)$value, $sql);
-            $sql = str_replace(':' . $key, "'" . addslashes((string)$value) . "'", $sql);
+            $sql = str_replace('{' . $key . '}', (string) $value, $sql);
         }
 
         return $sql;
@@ -415,33 +455,24 @@ class NativeClickhouseClientService implements ClickhouseClientInterface
 }
 ```
 
-### Mise a jour du ServiceProvider
+### ServiceProvider
 
 ```php
-// app/Providers/ClickhouseServiceProvider.php
-
 $this->app->singleton('clickhouse', function () {
-    // Detecter si l'extension native est disponible
     if (function_exists('clickhouse_connect')) {
-        return new NativeClickhouseClientService(
-            config('clickhouse')
-        );
+        return new NativeClickhouseClientService(config('clickhouse'));
     }
-    // Fallback sur smi2
-    return new ClickhouseClientService(
-        config('clickhouse')
-    );
+    return new ClickhouseClientService(config('clickhouse'));   // fallback smi2
 });
 ```
 
-### Mise a jour de la config
+### Config
 
 ```php
-// config/clickhouse.php — ajouter le port natif
-
+// config/clickhouse.php
 'credentials' => [
     'host'     => env('CLICKHOUSE_HOST', 'clickhouse'),
-    'port'     => env('CLICKHOUSE_NATIVE_PORT', '9000'),  // Port natif
+    'port'     => env('CLICKHOUSE_NATIVE_PORT', '9000'),  // port natif
     'username' => env('CLICKHOUSE_USER', 'default'),
     'password' => env('CLICKHOUSE_PASSWORD', ''),
     'https'    => env('CLICKHOUSE_HTTPS', false),
@@ -453,26 +484,39 @@ $this->app->singleton('clickhouse', function () {
 ## Checklist de migration
 
 - [ ] Ajouter `CLICKHOUSE_NATIVE_PORT=9000` dans `.env`
-- [ ] Creer `ClickhouseClientInterface.php`
-- [ ] Creer `NativeClickhouseClientService.php` avec conversion de bindings
-- [ ] Mettre a jour `ClickhouseServiceProvider` pour detecter l'extension
-- [ ] Remplacer `DatabaseException` par `RuntimeException` dans les catches
-- [ ] Remplacer `$stmt->rows()` par acces direct au tableau
-- [ ] Remplacer `$stmt->fetchOne('col')` par `$rows[0]['col'] ?? null`
-- [ ] Remplacer `$stmt->fetchOne()` par `$rows[0][array_key_first($rows[0])] ?? null`
-- [ ] Adapter les `Dockerfile` pour utiliser `frankenphp php-cli` au lieu de `php`
-- [ ] Adapter les `Makefile` pour utiliser `frankenphp php-cli artisan` au lieu de `php artisan`
-- [ ] Verifier que le service ClickHouse expose le port 9000 dans `docker-compose.yml`
-- [ ] Lancer les tests existants et verifier la compatibilite
+- [ ] Créer `ClickhouseClientInterface.php`
+- [ ] Créer `NativeClickhouseClientService.php` avec conversion de bindings
+- [ ] Mettre à jour `ClickhouseServiceProvider` pour détecter l'extension
+- [ ] Remplacer `DatabaseException` par `RuntimeException` dans les catches ; exploiter `getCode()`
+- [ ] Remplacer `$stmt->rows()` / `$stmt->fetchOne('col')` par l'accès direct au tableau
+- [ ] Basculer les gros SELECT sur `clickhouse_query_cursor` (mémoire bornée)
+- [ ] Basculer les gros INSERT sur le batch incrémental
+- [ ] Adapter `Dockerfile`/`Makefile` pour `frankenphp php-cli` au lieu de `php`
+- [ ] Vérifier que ClickHouse expose le port 9000 dans `docker-compose.yml`
+- [ ] Lancer la suite de tests
 
 ## Points d'attention
 
-1. **`frankenphp php-cli`** : Les fonctions de l'extension ne sont disponibles que via le binaire `frankenphp`, pas via `php`. Tous les scripts (`artisan`, cron, workers) doivent etre lances avec `frankenphp php-cli`.
+1. **`frankenphp php-cli`** : les fonctions de l'extension ne sont disponibles
+   que via le binaire `frankenphp`, pas via `php`. Tous les scripts (`artisan`,
+   cron, workers) doivent être lancés avec `frankenphp php-cli`.
 
-2. **IN avec tableaux** : smi2 supporte `IN (:values)` avec un tableau en binding. L'extension native ne le supporte pas directement — le wrapper `convertBindings()` gere ce cas en inlinant les valeurs.
+2. **Toujours fermer les handles** : `clickhouse_cursor_close` /
+   `clickhouse_batch_send`/`_abort` doivent être appelés (idéalement dans un
+   `finally`). Un handle abandonné retient une socket du pool. Un ramasse-miettes
+   interne récupère les handles inactifs depuis plus de 10 minutes, mais ne
+   comptez pas dessus en régime nominal — en mode worker FrankenPHP le process ne
+   redémarre pas entre les requêtes.
 
-3. **Noms de tables en binding** : smi2 supporte `{table}` dans les bindings. L'extension native ne fait pas de substitution de noms — le wrapper `resolveIdentifierBindings()` gere ce cas.
+3. **`IN` avec tableaux** : supporté nativement via `{param:Array(T)}` — passer un
+   tableau PHP en paramètre (voir `convertBindings`).
 
-4. **Connexion persistante** : L'extension maintient un pool de 4 connexions. Un seul `clickhouse_connect()` suffit au demarrage — pas besoin de reconnecter a chaque requete.
+4. **Noms de tables en binding** : l'extension ne substitue pas les identifiants
+   — utiliser la concaténation PHP (`resolveIdentifierBindings`).
 
-5. **Readonly** : L'extension ne supporte pas le mode `readonly` directement. Si necessaire, creer un utilisateur ClickHouse avec des permissions limitees.
+5. **Pool de connexions** : `clickhouse.Conn` est lui-même un pool thread-safe. Un
+   seul `clickhouse_connect()` au démarrage suffit ; dimensionner via le DSN
+   (`max_open_conns`, `max_idle_conns`, `conn_max_lifetime`).
+
+6. **Readonly** : pas de mode `readonly` dédié — créer un utilisateur ClickHouse
+   aux permissions limitées, ou passer `['settings' => ['readonly' => 1]]`.
