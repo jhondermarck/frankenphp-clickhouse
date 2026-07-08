@@ -1,4 +1,4 @@
-.PHONY: all build ext bench bench_worker_docker bench_docker up down restart test test_go frankenphp
+.PHONY: all build ext bench bench_memory bench_worker_docker bench_docker up down restart test test_go frankenphp
 
 all: build
 
@@ -64,6 +64,9 @@ ext: frankenphp
 
 bench:
 	./frankenphp-clickhouse php-cli web/bench.php
+
+bench_memory:
+	./frankenphp-clickhouse php-cli web/bench_memory.php
 
 bench_worker:
 	docker-compose exec frankenphp php /app/bench_http.php

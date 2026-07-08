@@ -18,6 +18,7 @@ import (
 	"unsafe"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/dunglas/frankenphp"
 )
 
@@ -434,26 +435,61 @@ func clickhouse_query_array(query *C.zend_string, params *C.zval) unsafe.Pointer
 		releaseConn(client)
 	}()
 
+	packer, err := newRowPacker(rows)
+	if err != nil {
+		setLastError(err.Error())
+		return nil
+	}
+	if packer == nil { // zero-column result
+		return newResultArray(0)
+	}
+	result, _, err := packer.packRows(rows, 0)
+	if err != nil {
+		setLastError(err.Error())
+		return nil
+	}
+	return result
+}
+
+// ── Row packer (shared by query_array and streaming cursors) ─────────────────
+
+// rowPacker holds the per-query column metadata and scan destinations,
+// reused across packRows calls on the same result stream.
+type rowPacker struct {
+	cols  []string
+	metas []colMeta
+	dests []interface{}
+}
+
+// newRowPacker parses column metadata for a result stream. A nil packer
+// with a nil error means the result has no columns.
+func newRowPacker(rows driver.Rows) (*rowPacker, error) {
 	cols := rows.Columns()
 	colTypes := rows.ColumnTypes()
 	n := len(cols)
 	if n == 0 {
-		return newResultArray(0)
+		return nil, nil
 	}
-
 	metas := make([]colMeta, n)
 	dests := make([]interface{}, n)
 	for i, ct := range colTypes {
 		m, err := parseColMeta(ct.DatabaseTypeName())
 		if err != nil {
-			setLastError(fmt.Sprintf("column %q: %s", cols[i], err))
-			return nil
+			return nil, fmt.Errorf("column %q: %s", cols[i], err)
 		}
 		metas[i] = m
 		dests[i] = allocScanDest(m)
 	}
+	return &rowPacker{cols: cols, metas: metas, dests: dests}, nil
+}
+
+// packRows drains up to max rows (max <= 0 → all remaining) into a fresh
+// result array. Returns the array, whether the stream is exhausted, and
+// any error — the partial array is freed before an error return.
+func (p *rowPacker) packRows(rows driver.Rows, max int64) (unsafe.Pointer, bool, error) {
+	n := len(p.cols)
 	keys := make([]*C.zend_string, n)
-	for i, col := range cols {
+	for i, col := range p.cols {
 		keys[i] = makeKey(col)
 	}
 	// Each row array takes its own reference on the key strings; drop
@@ -465,44 +501,179 @@ func clickhouse_query_array(query *C.zend_string, params *C.zval) unsafe.Pointer
 	}()
 
 	types := make([]C.uint8_t, n)
-	soff  := make([]C.uint32_t, n)
-	slen  := make([]C.uint32_t, n)
+	soff := make([]C.uint32_t, n)
+	slen := make([]C.uint32_t, n)
 	ivals := make([]C.int64_t, n)
 	uvals := make([]C.uint64_t, n)
 	fvals := make([]C.double, n)
-	sbuf  := make([]byte, 0, n*64)
+	sbuf := make([]byte, 0, n*64)
 
 	// Start empty and let the packed hashtable grow — preallocating for a
 	// large result wastes several MB on every small query in worker mode.
 	result := newResultArray(0)
 
-	for rows.Next() {
+	var count int64
+	done := false
+	for {
+		if max > 0 && count >= max {
+			break
+		}
+		if !rows.Next() {
+			done = true
+			break
+		}
 		// Reset nullable pointers so the driver can set them to nil for NULL
-		for i, m := range metas {
+		for i, m := range p.metas {
 			if m.nullable {
-				resetNullableDest(m.kind, dests[i])
+				resetNullableDest(m.kind, p.dests[i])
 			}
 		}
-		if err := rows.Scan(dests...); err != nil {
+		if err := rows.Scan(p.dests...); err != nil {
 			freeResultArray(result)
-			setLastError("scan failed: " + err.Error())
-			return nil
+			return nil, false, fmt.Errorf("scan failed: %s", err)
 		}
 		sbuf = sbuf[:0]
-		for i, m := range metas {
-			packCol(i, m, dests[i], types, soff, slen, ivals, uvals, fvals, &sbuf)
+		for i, m := range p.metas {
+			packCol(i, m, p.dests[i], types, soff, slen, ivals, uvals, fvals, &sbuf)
 		}
 		addGenericRow(result, keys, types, sbuf, soff, slen, ivals, uvals, fvals, n)
+		count++
 	}
 	// A mid-stream failure (network cut, server error) ends the Next() loop
 	// without error on Scan — surface it instead of returning truncated rows.
-	if err := rows.Err(); err != nil {
-		freeResultArray(result)
-		setLastError("query interrupted: " + err.Error())
+	if done {
+		if err := rows.Err(); err != nil {
+			freeResultArray(result)
+			return nil, false, fmt.Errorf("query interrupted: %s", err)
+		}
+	}
+	return result, done, nil
+}
+
+// ── Streaming cursors ─────────────────────────────────────────────────────────
+
+// cursorState is one open streaming query. The pooled connection is held
+// for the cursor's lifetime and released at exhaustion or close.
+type cursorState struct {
+	mu     sync.Mutex
+	conn   clickhouse.Conn
+	rows   driver.Rows
+	cancel context.CancelFunc
+	packer *rowPacker
+	done   bool
+}
+
+var (
+	cursorsMu sync.Mutex
+	cursors   = map[int64]*cursorState{}
+	cursorSeq int64
+)
+
+// releaseResources closes the stream and returns the connection to the
+// pool. Callers must hold cur.mu.
+func (cur *cursorState) releaseResources() {
+	if cur.done {
+		return
+	}
+	cur.done = true
+	cur.rows.Close()
+	cur.cancel()
+	releaseConn(cur.conn)
+}
+
+//export clickhouse_query_cursor
+func clickhouse_query_cursor(query *C.zend_string, params *C.zval) C.int64_t {
+	client, err := acquireConn()
+	if err != nil {
+		setLastError(err.Error())
+		return -1
+	}
+	queryStr := frankenphp.GoString(unsafe.Pointer(query))
+
+	args, err := buildQueryArgs(params)
+	if err != nil {
+		releaseConn(client)
+		setLastError(err.Error())
+		return -1
+	}
+
+	// The context must outlive this call — it is cancelled when the
+	// cursor is exhausted or closed.
+	ctx, cancel := callCtx()
+	rows, err := client.Query(ctx, queryStr, args...)
+	if err != nil {
+		cancel()
+		releaseConn(client)
+		setLastError(err.Error())
+		return -1
+	}
+	packer, err := newRowPacker(rows)
+	if err != nil {
+		rows.Close()
+		cancel()
+		releaseConn(client)
+		setLastError(err.Error())
+		return -1
+	}
+
+	cur := &cursorState{conn: client, rows: rows, cancel: cancel, packer: packer}
+	if packer == nil { // zero-column result: nothing to stream
+		cur.releaseResources()
+	}
+	cursorsMu.Lock()
+	cursorSeq++
+	id := cursorSeq
+	cursors[id] = cur
+	cursorsMu.Unlock()
+	return C.int64_t(id)
+}
+
+//export clickhouse_cursor_fetch
+func clickhouse_cursor_fetch(id C.int64_t, maxRows C.int64_t) unsafe.Pointer {
+	cursorsMu.Lock()
+	cur, ok := cursors[int64(id)]
+	cursorsMu.Unlock()
+	if !ok {
+		setLastError(fmt.Sprintf("unknown cursor %d — already closed or never opened", int64(id)))
 		return nil
 	}
 
+	cur.mu.Lock()
+	defer cur.mu.Unlock()
+	if cur.done {
+		return newResultArray(0)
+	}
+
+	result, done, err := cur.packer.packRows(cur.rows, int64(maxRows))
+	if err != nil {
+		cur.releaseResources()
+		cursorsMu.Lock()
+		delete(cursors, int64(id))
+		cursorsMu.Unlock()
+		setLastError(err.Error())
+		return nil
+	}
+	if done {
+		// Free the stream eagerly; the cursor stays registered so later
+		// fetches return empty arrays until clickhouse_cursor_close().
+		cur.releaseResources()
+	}
 	return result
+}
+
+//export clickhouse_cursor_close
+func clickhouse_cursor_close(id C.int64_t) unsafe.Pointer {
+	cursorsMu.Lock()
+	cur, ok := cursors[int64(id)]
+	delete(cursors, int64(id))
+	cursorsMu.Unlock()
+	if !ok {
+		return frankenphp.PHPString(fmt.Sprintf("ERROR: unknown cursor %d", int64(id)), false)
+	}
+	cur.mu.Lock()
+	cur.releaseResources()
+	cur.mu.Unlock()
+	return frankenphp.PHPString("Ok", false)
 }
 
 func connectClickHouse(dsn string) (clickhouse.Conn, error) {

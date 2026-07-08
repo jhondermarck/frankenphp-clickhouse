@@ -52,8 +52,9 @@ Parameters: 3 warmup + 20 iterations, 100k rows.
 ```
   Method                          avg      min      p95      rows    vs SMI2
   ──────────────────────────────────────────────────────────────────────────
-  SMI2 – HTTP + php-array        0.324s   0.300s   0.352s   100,000   ref
-  Go TCP + query_array            0.038s   0.036s   0.041s   100,000  ×8.54
+  SMI2 – HTTP + php-array        0.324s   0.285s   0.397s   100,000   ref
+  Go TCP + query_array            0.038s   0.036s   0.040s   100,000  ×8.57
+  Go TCP + cursor (10k chunks)    0.040s   0.039s   0.043s   100,000  ×8.08
 ```
 
 ### INSERT (100k rows batch)
@@ -68,11 +69,26 @@ Parameters: 3 warmup + 20 iterations, 100k rows.
 > INSERT variance comes from MergeTree background merges on the ClickHouse side, not the code.
 > SELECT gains grow with volume because the fixed HTTP/JSON overhead becomes proportionally larger.
 
+### Memory — streaming cursor (1M rows read, `make bench_memory`)
+
+```
+  Method                        peak RAM
+  ───────────────────────────────────────
+  query_array (full result)     +498 MB
+  cursor (10k chunks)             +6 MB
+```
+
+The cursor keeps memory bounded by the chunk size regardless of result size —
+use it for exports, ETL, or any result too large to materialize at once.
+
 ## PHP API
 
 ```php
 clickhouse_connect(string $dsn): string
 clickhouse_query_array(string $query, ?array $params = null): array
+clickhouse_query_cursor(string $query, ?array $params = null): int
+clickhouse_cursor_fetch(int $cursor, int $max_rows = 10000): array
+clickhouse_cursor_close(int $cursor): string
 clickhouse_exec(string $query, ?array $params = null): string
 clickhouse_insert(string $table, array $values, ?array $columns = null): string
 clickhouse_disconnect(): string
@@ -113,6 +129,15 @@ $rows = clickhouse_query_array(
     'SELECT * FROM events WHERE machine_id = {machine:String} AND start > {after:DateTime}',
     ['machine' => 'M-001', 'after' => '2024-01-01 00:00:00']
 );
+
+// Streaming read — bounded memory, chunk by chunk (always close the cursor)
+$cursor = clickhouse_query_cursor('SELECT * FROM events');
+while (count($rows = clickhouse_cursor_fetch($cursor, 10000)) > 0) {
+    foreach ($rows as $row) {
+        // process / write to file / forward…
+    }
+}
+clickhouse_cursor_close($cursor);
 
 // DDL
 clickhouse_exec('TRUNCATE TABLE staging');

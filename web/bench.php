@@ -234,6 +234,21 @@ $goQueryArray = benchGo($dsn, function () use ($selectQuery) {
 });
 printRow('Go TCP + query_array (générique)', $goQueryArray, $selRef);
 
+// ── 5. Go TCP + cursor (streaming, chunks de 10k) ────────────────────────────
+$cursorRows = 0;
+$goCursor = benchGo($dsn, function () use ($selectQuery, &$cursorRows) {
+    $cur = clickhouse_query_cursor($selectQuery);
+    $cursorRows = 0;
+    while (count($chunk = clickhouse_cursor_fetch($cur, 10000)) > 0) {
+        $cursorRows += count($chunk);
+        unset($chunk);
+    }
+    clickhouse_cursor_close($cur);
+    return null;
+});
+$goCursor['rows'] = $cursorRows;
+printRow('Go TCP + cursor (streaming, 10k chunks)', $goCursor, $selRef);
+
 // ── SELECT résumé ────────────────────────────────────────────────────────────
 separator();
 

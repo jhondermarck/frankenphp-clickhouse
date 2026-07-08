@@ -790,6 +790,99 @@ try {
 ok($badColThrew, 'invalid column name throws');
 
 // =============================================================================
+// Streaming cursor — bounded-memory chunked reads
+// =============================================================================
+
+suite('Cursor streaming');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_cursor_test");
+clickhouse_exec("CREATE TABLE clickhousephp_cursor_test (n UInt32, label String) ENGINE = Memory");
+clickhouse_exec("INSERT INTO clickhousephp_cursor_test SELECT number, concat('row-', toString(number)) FROM numbers(25000)");
+
+$cur = clickhouse_query_cursor("SELECT n, label FROM clickhousephp_cursor_test ORDER BY n");
+ok(is_int($cur), 'query_cursor returns int handle');
+
+$chunk1 = clickhouse_cursor_fetch($cur, 10000);
+eq(count($chunk1), 10000, 'chunk 1 = 10000 rows');
+eq($chunk1[0]['n'], 0, 'chunk 1 starts at row 0');
+eq($chunk1[9999]['n'], 9999, 'chunk 1 ends at row 9999');
+eq($chunk1[0]['label'], 'row-0', 'row format matches query_array');
+
+$chunk2 = clickhouse_cursor_fetch($cur, 10000);
+eq(count($chunk2), 10000, 'chunk 2 = 10000 rows');
+eq($chunk2[0]['n'], 10000, 'chunk 2 continues at row 10000');
+
+$chunk3 = clickhouse_cursor_fetch($cur, 10000);
+eq(count($chunk3), 5000, 'chunk 3 = 5000 rows (tail)');
+eq($chunk3[4999]['n'], 24999, 'last row is 24999');
+
+$chunk4 = clickhouse_cursor_fetch($cur, 10000);
+eq(count($chunk4), 0, 'fetch after exhaustion returns empty array');
+
+eq(clickhouse_cursor_close($cur), 'Ok', 'cursor_close returns Ok');
+
+$closedThrew = false;
+try {
+    clickhouse_cursor_fetch($cur);
+} catch (RuntimeException $e) {
+    $closedThrew = true;
+}
+ok($closedThrew, 'fetch after close throws');
+
+$doubleCloseThrew = false;
+try {
+    clickhouse_cursor_close($cur);
+} catch (RuntimeException $e) {
+    $doubleCloseThrew = true;
+}
+ok($doubleCloseThrew, 'double close throws');
+
+// Named parameter binding works through cursors too
+$cur2 = clickhouse_query_cursor(
+    "SELECT n FROM clickhousephp_cursor_test WHERE n < {lim:UInt32} ORDER BY n",
+    ['lim' => 42]
+);
+$rows = clickhouse_cursor_fetch($cur2, 100);
+eq(count($rows), 42, 'cursor with named params');
+clickhouse_cursor_close($cur2);
+
+// Two cursors interleaved on the same pool
+$curA = clickhouse_query_cursor("SELECT n FROM clickhousephp_cursor_test ORDER BY n");
+$curB = clickhouse_query_cursor("SELECT n FROM clickhousephp_cursor_test ORDER BY n DESC");
+$a1 = clickhouse_cursor_fetch($curA, 5);
+$b1 = clickhouse_cursor_fetch($curB, 5);
+$a2 = clickhouse_cursor_fetch($curA, 5);
+eq($a1[0]['n'], 0, 'cursor A chunk 1');
+eq($b1[0]['n'], 24999, 'cursor B interleaved (DESC)');
+eq($a2[0]['n'], 5, 'cursor A position preserved across B fetches');
+clickhouse_cursor_close($curA);
+clickhouse_cursor_close($curB);
+
+// Mid-stream close releases the pooled connection cleanly
+$curC = clickhouse_query_cursor("SELECT n FROM clickhousephp_cursor_test");
+clickhouse_cursor_fetch($curC, 10);
+eq(clickhouse_cursor_close($curC), 'Ok', 'mid-stream close returns Ok');
+$rows = clickhouse_query_array("SELECT count() AS c FROM clickhousephp_cursor_test");
+eq($rows[0]['c'], 25000, 'pool healthy after mid-stream close');
+
+// Errors at open
+$badCursorThrew = false;
+try {
+    clickhouse_query_cursor("SELECT * FROM nonexistent_cursor_table_xyz");
+} catch (RuntimeException $e) {
+    $badCursorThrew = true;
+}
+ok($badCursorThrew, 'bad query throws at cursor open');
+
+// Default chunk size
+$curD = clickhouse_query_cursor("SELECT n FROM clickhousephp_cursor_test ORDER BY n");
+$rows = clickhouse_cursor_fetch($curD);
+eq(count($rows), 10000, 'default max_rows is 10000');
+clickhouse_cursor_close($curD);
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_cursor_test");
+
+// =============================================================================
 // Cleanup
 // =============================================================================
 

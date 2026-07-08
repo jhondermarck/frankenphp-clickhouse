@@ -114,3 +114,55 @@ PHP_FUNCTION(clickhouse_query_array)
     }
     RETURN_ARR(result);
 }
+
+PHP_FUNCTION(clickhouse_query_cursor)
+{
+    zend_string *query = NULL;
+    zval *params = NULL;
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(query)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY_OR_NULL(params)
+    ZEND_PARSE_PARAMETERS_END();
+    int64_t id = clickhouse_query_cursor(query, params);
+    if (id < 0) {
+        zend_string *err = clickhouse_get_last_error();
+        const char *msg = err ? ZSTR_VAL(err) : "ClickHouse cursor open failed";
+        zend_throw_exception(spl_ce_RuntimeException, msg, 0);
+        if (err) { zend_string_release(err); }
+        RETURN_THROWS();
+    }
+    RETURN_LONG((zend_long)id);
+}
+
+PHP_FUNCTION(clickhouse_cursor_fetch)
+{
+    zend_long id = 0;
+    zend_long max_rows = 10000;
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_LONG(id)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(max_rows)
+    ZEND_PARSE_PARAMETERS_END();
+    zend_array *result = clickhouse_cursor_fetch((int64_t)id, (int64_t)max_rows);
+    if (result == NULL) {
+        zend_string *err = clickhouse_get_last_error();
+        const char *msg = err ? ZSTR_VAL(err) : "ClickHouse cursor fetch failed";
+        zend_throw_exception(spl_ce_RuntimeException, msg, 0);
+        if (err) { zend_string_release(err); }
+        RETURN_THROWS();
+    }
+    RETURN_ARR(result);
+}
+
+PHP_FUNCTION(clickhouse_cursor_close)
+{
+    zend_long id = 0;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(id)
+    ZEND_PARSE_PARAMETERS_END();
+    zend_string *result = clickhouse_cursor_close((int64_t)id);
+    if (ch_throw_on_error(result)) { RETURN_THROWS(); }
+    if (result) { RETURN_STR(result); }
+    RETURN_EMPTY_STRING();
+}
