@@ -316,6 +316,21 @@ Any other parameter is passed through as a ClickHouse **query setting**
 (driver behavior) — e.g. `?max_execution_time=60` applies to every query
 on the connection.
 
+## Security Notes
+
+- **The DSN is trusted configuration.** `ca_cert`, `client_cert`, and
+  `client_key` are read from the host filesystem, so a DSN assembled from
+  untrusted input would be an arbitrary-file-read probe. Treat the DSN like a
+  connection string in a config file — never build it from user data.
+- **SQL parameters are safe; identifiers are not parameterized.** Values go
+  through native `{name:Type}` bindings. Table and column names are validated
+  (`validIdent`) but not bound — pass them as code constants, not user input.
+- **The `docker-compose.yml` is a dev/bench stack**, not a production
+  template: it ships a default password (override `CLICKHOUSE_PASSWORD` or use
+  secrets) and runs containers as root. `sample/Dockerfile` shows a non-root
+  production build; the main build verifies Go module checksums (no
+  `GONOSUMDB`/`GOPROXY=direct`).
+
 ## Worker Mode (FrankenPHP)
 
 In worker mode, the ClickHouse connection is established **once** at process boot and reused for all HTTP requests — eliminating TCP + handshake cost per call. Connection is retried up to 5 times on startup.

@@ -460,7 +460,7 @@ func packCol(
 			}
 			jm = (*j).NestedMap()
 		}
-		arr := buildAnyMap(jm)
+		arr := buildAnyMap(jm, 0)
 		uvals[i] = C.uint64_t(uintptr(arr))
 		types[i] = chArray
 	case kindArray:
@@ -788,17 +788,25 @@ func reflectScalarString(v reflect.Value, m *colMeta) string {
 
 // ── Dynamically-typed values (JSON trees) ─────────────────────────────────────
 
+// maxJSONDepth caps recursion when materializing a JSON tree into PHP
+// arrays. JSON values come from the server, but a pathologically deep
+// document should fail a leaf rather than overflow the Go stack.
+const maxJSONDepth = 128
+
 // buildAnyMap converts a JSON NestedMap into a PHP associative array
 // (keys sorted for deterministic output).
-func buildAnyMap(m map[string]any) unsafe.Pointer {
+func buildAnyMap(m map[string]any, depth int) unsafe.Pointer {
 	arr := C.ch_new_array(C.uint32_t(len(m)))
+	if depth > maxJSONDepth {
+		return unsafe.Pointer(arr)
+	}
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		addAnyKV((*C.zend_array)(arr), phpKey{s: k}, m[k])
+		addAnyKV((*C.zend_array)(arr), phpKey{s: k}, m[k], depth)
 	}
 	return unsafe.Pointer(arr)
 }
@@ -806,7 +814,11 @@ func buildAnyMap(m map[string]any) unsafe.Pointer {
 // addAnyKV adds one dynamically-typed value (JSON leaf or subtree)
 // under a key. Lists use sequential int keys, which PHP stores as a
 // packed indexed array.
-func addAnyKV(arr *C.zend_array, k phpKey, v any) {
+func addAnyKV(arr *C.zend_array, k phpKey, v any, depth int) {
+	if depth > maxJSONDepth {
+		kvAddNull(arr, k)
+		return
+	}
 	if vt, ok := v.(chcol.Variant); ok {
 		if vt.Nil() {
 			kvAddNull(arr, k)
@@ -860,21 +872,21 @@ func addAnyKV(arr *C.zend_array, k phpKey, v any) {
 	case netip.Addr:
 		kvAddStr(arr, k, t.String())
 	case map[string]any:
-		kvAddArr(arr, k, (*C.zend_array)(buildAnyMap(t)))
+		kvAddArr(arr, k, (*C.zend_array)(buildAnyMap(t, depth+1)))
 	case chcol.JSON:
 		// A nested object (e.g. an element of a JSON array of objects)
 		// surfaces as its own JSON value — recurse into its NestedMap.
-		kvAddArr(arr, k, (*C.zend_array)(buildAnyMap(t.NestedMap())))
+		kvAddArr(arr, k, (*C.zend_array)(buildAnyMap(t.NestedMap(), depth+1)))
 	case *chcol.JSON:
 		if t == nil {
 			kvAddNull(arr, k)
 			return
 		}
-		kvAddArr(arr, k, (*C.zend_array)(buildAnyMap(t.NestedMap())))
+		kvAddArr(arr, k, (*C.zend_array)(buildAnyMap(t.NestedMap(), depth+1)))
 	case []any:
 		sub := C.ch_new_array(C.uint32_t(len(t)))
 		for j, e := range t {
-			addAnyKV((*C.zend_array)(sub), phpKey{isInt: true, i: int64(j)}, e)
+			addAnyKV((*C.zend_array)(sub), phpKey{isInt: true, i: int64(j)}, e, depth+1)
 		}
 		kvAddArr(arr, k, (*C.zend_array)(sub))
 	default:
@@ -887,18 +899,18 @@ func addAnyKV(arr *C.zend_array, k phpKey, v any) {
 				kvAddNull(arr, k)
 				return
 			}
-			addAnyKV(arr, k, rv.Elem().Interface())
+			addAnyKV(arr, k, rv.Elem().Interface(), depth+1)
 		case reflect.Slice, reflect.Array:
 			sub := C.ch_new_array(C.uint32_t(rv.Len()))
 			for j := 0; j < rv.Len(); j++ {
-				addAnyKV((*C.zend_array)(sub), phpKey{isInt: true, i: int64(j)}, rv.Index(j).Interface())
+				addAnyKV((*C.zend_array)(sub), phpKey{isInt: true, i: int64(j)}, rv.Index(j).Interface(), depth+1)
 			}
 			kvAddArr(arr, k, (*C.zend_array)(sub))
 		case reflect.Map:
 			sub := C.ch_new_array(C.uint32_t(rv.Len()))
 			iter := rv.MapRange()
 			for iter.Next() {
-				addAnyKV((*C.zend_array)(sub), phpKey{s: fmt.Sprintf("%v", iter.Key().Interface())}, iter.Value().Interface())
+				addAnyKV((*C.zend_array)(sub), phpKey{s: fmt.Sprintf("%v", iter.Key().Interface())}, iter.Value().Interface(), depth+1)
 			}
 			kvAddArr(arr, k, (*C.zend_array)(sub))
 		default:

@@ -130,6 +130,11 @@ func clickhouse_close(id C.int64_t) (ret unsafe.Pointer) {
 //	ca_cert      path to a PEM CA bundle (implies TLS)
 //	client_cert  path to a PEM client certificate (mutual TLS)
 //	client_key   path to the matching client key
+//
+// SECURITY: the DSN is trusted configuration. ca_cert/client_cert/client_key
+// are read from the host filesystem, so a DSN built from untrusted input
+// would be an arbitrary-file-read probe. Never construct a DSN from
+// user-supplied data — treat it like a connection string in a config file.
 func connectClickHouse(dsn string) (clickhouse.Conn, time.Duration, error) {
 	u, err := url.Parse(dsn)
 	if err != nil {

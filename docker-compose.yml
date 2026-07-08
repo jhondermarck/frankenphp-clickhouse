@@ -1,3 +1,8 @@
+# Local development / benchmark stack — NOT a production template.
+# The password below is a convenience default for localhost; override it
+# (shell or root .env: CLICKHOUSE_PASSWORD=…) and prefer Docker/Compose
+# secrets in production. Both containers also run as root here — see
+# sample/Dockerfile for a non-root production build.
 services:
   frankenphp:
     build:
@@ -12,7 +17,7 @@ services:
     # immutable) — the host .env targets host-mapped ports, not the
     # in-network clickhouse:9000, so sharing it would break the worker.
     environment:
-      - CH_DSN=clickhouse://default:strongpassword@clickhouse:9000/events_bench?secure=false&timeout=30s
+      - CH_DSN=clickhouse://default:${CLICKHOUSE_PASSWORD:-strongpassword}@clickhouse:9000/events_bench?secure=false&timeout=30s
     command: sh -c '[ -f /app/.env ] || cp /app/.env.example /app/.env && frankenphp run --config /etc/caddy/Caddyfile'
     depends_on:
       clickhouse:
@@ -30,7 +35,7 @@ services:
     environment:
       - CLICKHOUSE_DB=events_bench
       - CLICKHOUSE_USER=default
-      - CLICKHOUSE_PASSWORD=strongpassword
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-strongpassword}
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./docker/clickhouse/migrations:/docker-entrypoint-initdb.d

@@ -21,3 +21,12 @@ COPY --from=builder /frankenphp /usr/local/bin/frankenphp
 
 WORKDIR /app
 COPY . /app
+
+# Production hardening: drop root. This assumes the app listens on a
+# non-privileged port (e.g. :8080) behind a TLS-terminating proxy. If you
+# need FrankenPHP to bind :443 directly, grant the binary
+# CAP_NET_BIND_SERVICE (setcap 'cap_net_bind_service=+ep' /usr/local/bin/frankenphp)
+# rather than running as root.
+RUN groupadd -r app && useradd -r -g app -d /app app \
+    && chown -R app:app /app
+USER app
