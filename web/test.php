@@ -1289,7 +1289,127 @@ eq($r['j']['b']['c'], 'x', 'JSON nested object');
 eq($r['j']['arr'], [1, 2], 'JSON array leaf');
 ok(abs($r['j']['f'] - 1.5) < 0.0001, 'JSON float leaf');
 
+// JSON array of objects — leaves are unwrapped recursively
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_jsonarr_test");
+clickhouse_exec("CREATE TABLE clickhousephp_jsonarr_test (j JSON) ENGINE = Memory");
+clickhouse_exec("INSERT INTO clickhousephp_jsonarr_test VALUES (
+    '{\"items\": [{\"id\": 1, \"name\": \"a\"}, {\"id\": 2, \"name\": \"b\"}], \"n\": 3}'
+)");
+$r = clickhouse_query_array("SELECT * FROM clickhousephp_jsonarr_test")[0];
+ok(is_array($r['j']['items']), 'JSON array-of-objects is a PHP array');
+eq(count($r['j']['items']), 2, 'JSON array-of-objects length');
+eq($r['j']['items'][0]['name'], 'a', 'JSON array element object leaf');
+eq($r['j']['items'][1]['id'], 2, 'JSON array element int leaf');
+eq($r['j']['n'], 3, 'JSON scalar alongside array');
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_jsonarr_test");
+
 clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_big_test");
+
+// =============================================================================
+// Write path — Map and Array columns (round trip)
+// =============================================================================
+
+suite('Write path — Map and Array columns');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_wmap_test");
+clickhouse_exec("CREATE TABLE clickhousephp_wmap_test (
+    id       UInt32,
+    labels   Map(String, String),
+    counters Map(String, UInt64),
+    tags     Array(String),
+    matrix   Array(Array(UInt32))
+) ENGINE = Memory");
+
+// clickhouse_insert with a single assoc row: assoc-array cells become Maps,
+// list cells become Arrays.
+$r = clickhouse_insert('clickhousephp_wmap_test',
+    ['id' => 1,
+     'labels'   => ['env' => 'prod', 'region' => 'eu'],
+     'counters' => ['hits' => 42],
+     'tags'     => ['x', 'y'],
+     'matrix'   => [[1, 2], [3]]],
+    ['id', 'labels', 'counters', 'tags', 'matrix']);
+eq($r, 'Ok', 'insert row with Map/Array cells');
+
+// Batch path exercises the same phpValue conversion.
+$b = clickhouse_batch_begin('clickhousephp_wmap_test',
+    ['id', 'labels', 'counters', 'tags', 'matrix']);
+clickhouse_batch_append($b, [[
+    2,
+    ['env' => 'dev'],
+    ['hits' => 7],
+    ['z'],
+    [[9]],
+]]);
+eq(clickhouse_batch_send($b), 'Ok', 'batch send with Map/Array cells');
+
+$rows = clickhouse_query_array("SELECT * FROM clickhousephp_wmap_test ORDER BY id");
+eq(count($rows), 2, 'both write paths landed');
+eq($rows[0]['labels'], ['env' => 'prod', 'region' => 'eu'], 'inserted Map(String,String) round-trips');
+eq($rows[0]['counters'], ['hits' => 42], 'inserted Map(String,UInt64) round-trips');
+eq($rows[0]['tags'], ['x', 'y'], 'inserted Array(String) round-trips');
+eq($rows[0]['matrix'], [[1, 2], [3]], 'inserted Array(Array(UInt32)) round-trips');
+eq($rows[1]['labels'], ['env' => 'dev'], 'batch Map round-trips');
+eq($rows[1]['matrix'], [[9]], 'batch nested Array round-trips');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_wmap_test");
+
+// =============================================================================
+// Handle lifetime vs DSN timeout
+// =============================================================================
+
+suite('Handle lifetime vs DSN timeout');
+
+// A short DSN timeout is meant for single queries — it must NOT kill a
+// long-lived cursor or batch whose context spans many calls.
+$r = clickhouse_connect($dsnBase . $sep . 'timeout=300ms');
+eq($r, 'Ok', 'connect with 300ms DSN timeout');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_life_test");
+clickhouse_exec("CREATE TABLE clickhousephp_life_test (n UInt32) ENGINE = Memory");
+clickhouse_exec("INSERT INTO clickhousephp_life_test SELECT number FROM numbers(5000)");
+
+$cur = clickhouse_query_cursor("SELECT n FROM clickhousephp_life_test ORDER BY n");
+clickhouse_cursor_fetch($cur, 10);
+usleep(400000); // 400ms — well past the 300ms DSN timeout
+$survived = true;
+try {
+    $chunk = clickhouse_cursor_fetch($cur, 10);
+    $survived = count($chunk) === 10;
+} catch (RuntimeException $e) {
+    $survived = false;
+}
+ok($survived, 'cursor outlives the DSN timeout between fetches');
+clickhouse_cursor_close($cur);
+
+// Same for a batch held open across the timeout window.
+$b = clickhouse_batch_begin('clickhousephp_life_test', ['n']);
+clickhouse_batch_append($b, [[90001]]);
+usleep(400000);
+$batchSurvived = true;
+try {
+    clickhouse_batch_append($b, [[90002]]);
+    clickhouse_batch_send($b);
+} catch (RuntimeException $e) {
+    $batchSurvived = false;
+}
+ok($batchSurvived, 'batch outlives the DSN timeout between appends');
+$rows = clickhouse_query_array("SELECT count() AS c FROM clickhousephp_life_test WHERE n >= 90001");
+eq($rows[0]['c'], 2, 'batch rows landed after timeout window');
+
+// But an explicit per-call timeout on the cursor still bounds a slow query.
+$optThrew = false;
+try {
+    $curT = clickhouse_query_cursor("SELECT sleep(1)", null, ['timeout' => '200ms']);
+    clickhouse_cursor_fetch($curT);
+    clickhouse_cursor_close($curT);
+} catch (RuntimeException $e) {
+    $optThrew = true;
+}
+ok($optThrew, 'explicit per-call timeout still aborts a slow cursor');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_life_test");
+clickhouse_connect($dsn); // restore the default connection
 
 // =============================================================================
 // Cleanup

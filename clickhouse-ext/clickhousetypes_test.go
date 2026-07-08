@@ -3,6 +3,8 @@ package clickhousephp
 import (
 	"testing"
 	"time"
+
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
 func TestAppendClickHouseDateTime(t *testing.T) {
@@ -168,5 +170,53 @@ func TestSplitTopLevelComma(t *testing.T) {
 	}
 	if _, _, ok := splitTopLevelComma("NoCommaHere"); ok {
 		t.Error("splitTopLevelComma without top-level comma should return ok=false")
+	}
+}
+
+// fakeRows is a minimal driver.Rows for exercising the idle reaper.
+type fakeRows struct{ closed bool }
+
+func (f *fakeRows) Next() bool                       { return false }
+func (f *fakeRows) HasData() bool                    { return false }
+func (f *fakeRows) Scan(dest ...any) error           { return nil }
+func (f *fakeRows) ScanStruct(dest any) error        { return nil }
+func (f *fakeRows) ColumnTypes() []driver.ColumnType { return nil }
+func (f *fakeRows) Totals(dest ...any) error         { return nil }
+func (f *fakeRows) Columns() []string                { return nil }
+func (f *fakeRows) Close() error                     { f.closed = true; return nil }
+func (f *fakeRows) Err() error                       { return nil }
+
+func TestReapIdleHandles(t *testing.T) {
+	idle := &cursorState{rows: &fakeRows{}, cancel: func() {}, lastUsed: time.Now().Add(-time.Hour)}
+	fresh := &cursorState{rows: &fakeRows{}, cancel: func() {}, lastUsed: time.Now()}
+	cursorsMu.Lock()
+	cursors[9001] = idle
+	cursors[9002] = fresh
+	cursorsMu.Unlock()
+	defer func() {
+		cursorsMu.Lock()
+		delete(cursors, 9001)
+		delete(cursors, 9002)
+		cursorsMu.Unlock()
+	}()
+
+	if n := reapIdleHandles(time.Now()); n != 1 {
+		t.Fatalf("reaped %d handles, want 1", n)
+	}
+	if !idle.rows.(*fakeRows).closed {
+		t.Error("idle cursor's rows were not closed")
+	}
+	if !idle.done {
+		t.Error("idle cursor not marked done")
+	}
+	cursorsMu.Lock()
+	_, idleThere := cursors[9001]
+	_, freshThere := cursors[9002]
+	cursorsMu.Unlock()
+	if idleThere {
+		t.Error("idle cursor still registered")
+	}
+	if !freshThere {
+		t.Error("fresh cursor was wrongly reaped")
 	}
 }

@@ -19,15 +19,10 @@ jobs:
             -v "${{ github.workspace }}/web:/app" \
             composer:latest install --no-dev --no-interaction
 
+      # --wait relies on the compose healthcheck (clickhouse-client WITH
+      # the password — a bare clickhouse-client always fails auth here).
       - name: Start services
-        run: docker compose up -d --build
-
-      - name: Wait for ClickHouse
-        run: |
-          timeout 60 bash -c \
-            'until docker compose exec -T clickhouse \
-               clickhouse-client --query "SELECT 1" 2>/dev/null; \
-             do sleep 2; done'
+        run: docker compose up -d --build --wait
 
       - name: Wait for FrankenPHP (HTTP)
         run: |

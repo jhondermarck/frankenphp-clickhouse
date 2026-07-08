@@ -16,6 +16,7 @@ import (
 	"reflect"
 	_ "runtime/cgo"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -116,7 +117,13 @@ func phpAssoc(v any) (map[string]any, bool) {
 //   - settings:   map of ClickHouse query settings (max_execution_time…)
 //   - query_id:   tag the query for system.query_log / KILL QUERY
 //   - timeout:    Go duration overriding the connection's DSN timeout
-func callSetup(options *C.zval) (clickhouse.Conn, context.Context, context.CancelFunc, error) {
+//
+// inheritConnTimeout applies the connection's DSN-level timeout when no
+// explicit options.timeout is given. One-shot calls pass true; handle
+// factories (cursors, batches) pass false — their context spans the
+// handle's whole lifetime, and a DSN timeout meant for single queries
+// would kill a long-lived export or incremental insert mid-flight.
+func callSetup(options *C.zval, inheritConnTimeout bool) (clickhouse.Conn, context.Context, context.CancelFunc, error) {
 	noop := func() {}
 
 	var optMap map[string]any
@@ -179,6 +186,9 @@ func callSetup(options *C.zval) (clickhouse.Conn, context.Context, context.Cance
 	conn, timeout, err := resolveConn(connID)
 	if err != nil {
 		return nil, nil, noop, err
+	}
+	if !inheritConnTimeout {
+		timeout = 0
 	}
 	if timeoutOverride >= 0 {
 		timeout = timeoutOverride
@@ -434,14 +444,131 @@ func normalizeRows(values *C.zval, colNames []string, inferCols, requireColsForN
 	return rows, colNames, nil
 }
 
-// appendRows pushes normalized rows into a driver batch.
+// phpValue unwraps frankenphp container types into plain Go values —
+// used when no target column type is known (query parameters).
+func phpValue(v any) any {
+	switch t := v.(type) {
+	case frankenphp.AssociativeArray[any]:
+		m := make(map[string]any, len(t.Map))
+		for k, val := range t.Map {
+			m[k] = phpValue(val)
+		}
+		return m
+	case map[string]any:
+		for k, val := range t {
+			t[k] = phpValue(val)
+		}
+		return t
+	case []any:
+		for i, e := range t {
+			t[i] = phpValue(e)
+		}
+		return t
+	default:
+		return v
+	}
+}
+
+// phpValueTyped converts a PHP cell into the concrete Go type the driver
+// expects for a column. The driver's Map/Array columns reject the generic
+// map[string]any / []any that PHP arrays decode to (e.g. Map(String,String)
+// needs map[string]string), so we rebuild the container against the
+// column's ScanType. t may be nil (unknown type) — then we fall back to
+// phpValue's plain unwrapping and let the driver convert scalars.
+func phpValueTyped(v any, t reflect.Type) any {
+	var assoc map[string]any
+	switch tv := v.(type) {
+	case frankenphp.AssociativeArray[any]:
+		assoc = tv.Map
+	case map[string]any:
+		assoc = tv
+	}
+	if assoc != nil {
+		if t != nil && t.Kind() == reflect.Map {
+			m := reflect.MakeMapWithSize(t, len(assoc))
+			kt, vt := t.Key(), t.Elem()
+			for k, val := range assoc {
+				kv := coerce(k, kt)
+				vv := coerce(phpValueTyped(val, vt), vt)
+				if kv.IsValid() && vv.IsValid() {
+					m.SetMapIndex(kv, vv)
+				}
+			}
+			return m.Interface()
+		}
+		out := make(map[string]any, len(assoc))
+		for k, val := range assoc {
+			out[k] = phpValue(val)
+		}
+		return out
+	}
+	if arr, ok := v.([]any); ok {
+		if t != nil && t.Kind() == reflect.Slice {
+			et := t.Elem()
+			s := reflect.MakeSlice(t, len(arr), len(arr))
+			for i, e := range arr {
+				ev := coerce(phpValueTyped(e, et), et)
+				if ev.IsValid() {
+					s.Index(i).Set(ev)
+				}
+			}
+			return s.Interface()
+		}
+		for i, e := range arr {
+			arr[i] = phpValue(e)
+		}
+		return arr
+	}
+	return v
+}
+
+// coerce returns v as a reflect.Value of type t, converting numeric/string
+// kinds where possible. Returns the zero Value if the conversion can't be
+// done so the caller can skip rather than panic.
+func coerce(v any, t reflect.Type) reflect.Value {
+	rv := reflect.ValueOf(v)
+	if !rv.IsValid() {
+		return reflect.Value{}
+	}
+	if rv.Type() == t || rv.Type().AssignableTo(t) {
+		return rv
+	}
+	// PHP map keys arrive as strings; a numeric key column needs parsing.
+	if rv.Kind() == reflect.String && t.Kind() != reflect.String {
+		switch t.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			if n, err := strconv.ParseInt(rv.String(), 10, 64); err == nil {
+				return reflect.ValueOf(n).Convert(t)
+			}
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			if n, err := strconv.ParseUint(rv.String(), 10, 64); err == nil {
+				return reflect.ValueOf(n).Convert(t)
+			}
+		}
+	}
+	if rv.Type().ConvertibleTo(t) {
+		return rv.Convert(t)
+	}
+	return reflect.Value{}
+}
+
+// appendRows pushes normalized rows into a driver batch, converting each
+// cell to the concrete Go type its column expects.
 func appendRows(batch driver.Batch, rows [][]any, stride int) error {
+	cols := batch.Columns()
 	for i, row := range rows {
 		if stride > 0 && len(row) != stride {
 			return fmt.Errorf("row %d has %d values, expected %d columns", i, len(row), stride)
 		}
+		for ci, cell := range row {
+			var t reflect.Type
+			if ci < len(cols) {
+				t = cols[ci].ScanType()
+			}
+			row[ci] = phpValueTyped(cell, t)
+		}
 		if err := batch.Append(row...); err != nil {
-			return fmt.Errorf("row %d: %s", i, err)
+			return fmt.Errorf("row %d: %w", i, err)
 		}
 	}
 	return nil
@@ -450,7 +577,7 @@ func appendRows(batch driver.Batch, rows [][]any, stride int) error {
 //export clickhouse_insert
 func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval, options *C.zval) (ret unsafe.Pointer) {
 	defer phpPanicGuard(&ret)
-	client, ctx, cancel, err := callSetup(options)
+	client, ctx, cancel, err := callSetup(options, true)
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
@@ -507,6 +634,9 @@ func buildQueryArgs(params *C.zval) ([]any, error) {
 		if len(v) == 0 {
 			return nil, nil
 		}
+		for i, e := range v {
+			v[i] = phpValue(e)
+		}
 		return v, nil
 	case map[string]any:
 		if len(v) == 0 {
@@ -514,7 +644,7 @@ func buildQueryArgs(params *C.zval) ([]any, error) {
 		}
 		args := make([]any, 0, len(v))
 		for key, value := range v {
-			args = append(args, clickhouse.Named(key, value))
+			args = append(args, clickhouse.Named(key, phpValue(value)))
 		}
 		return args, nil
 	case frankenphp.AssociativeArray[any]:
@@ -523,7 +653,7 @@ func buildQueryArgs(params *C.zval) ([]any, error) {
 		}
 		args := make([]any, 0, len(v.Map))
 		for key, value := range v.Map {
-			args = append(args, clickhouse.Named(key, value))
+			args = append(args, clickhouse.Named(key, phpValue(value)))
 		}
 		return args, nil
 	default:
@@ -534,7 +664,7 @@ func buildQueryArgs(params *C.zval) ([]any, error) {
 //export clickhouse_exec
 func clickhouse_exec(query *C.zend_string, params *C.zval, options *C.zval) (ret unsafe.Pointer) {
 	defer phpPanicGuard(&ret)
-	client, ctx, cancel, err := callSetup(options)
+	client, ctx, cancel, err := callSetup(options, true)
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
@@ -618,7 +748,7 @@ func clickhouse_close(id C.int64_t) (ret unsafe.Pointer) {
 //export clickhouse_query_array
 func clickhouse_query_array(query *C.zend_string, params *C.zval, options *C.zval) (ret unsafe.Pointer) {
 	defer nullPanicGuard(&ret)
-	client, ctx, cancel, err := callSetup(options)
+	client, ctx, cancel, err := callSetup(options, true)
 	if err != nil {
 		setLastError(err.Error())
 		return nil
@@ -761,16 +891,83 @@ func (p *rowPacker) packRows(rows driver.Rows, max int64) (unsafe.Pointer, bool,
 	return result, done, nil
 }
 
+// ── Idle-handle reaper ────────────────────────────────────────────────────────
+
+// A PHP script that dies without closing a cursor or batch pins a
+// driver socket for the process lifetime — FrankenPHP workers never
+// restart between requests, and PHP has no destructor hook into this
+// extension. Handles idle longer than handleIdleTTL are reaped; a later
+// use of a reaped handle gets the usual "unknown cursor/batch" error.
+const handleIdleTTL = 10 * time.Minute
+
+func init() {
+	go func() {
+		for {
+			time.Sleep(time.Minute)
+			reapIdleHandles(time.Now())
+		}
+	}()
+}
+
+func reapIdleHandles(now time.Time) (reaped int) {
+	cutoff := now.Add(-handleIdleTTL)
+
+	cursorsMu.Lock()
+	curSnapshot := make(map[int64]*cursorState, len(cursors))
+	for id, cur := range cursors {
+		curSnapshot[id] = cur
+	}
+	cursorsMu.Unlock()
+	for id, cur := range curSnapshot {
+		cur.mu.Lock()
+		idle := cur.lastUsed.Before(cutoff)
+		if idle {
+			cur.releaseResources()
+		}
+		cur.mu.Unlock()
+		if idle {
+			cursorsMu.Lock()
+			delete(cursors, id)
+			cursorsMu.Unlock()
+			reaped++
+		}
+	}
+
+	batchesMu.Lock()
+	bSnapshot := make(map[int64]*batchState, len(batches))
+	for id, b := range batches {
+		bSnapshot[id] = b
+	}
+	batchesMu.Unlock()
+	for id, b := range bSnapshot {
+		b.mu.Lock()
+		idle := b.lastUsed.Before(cutoff)
+		if idle && !b.done {
+			_ = b.batch.Abort()
+			b.releaseResources()
+		}
+		b.mu.Unlock()
+		if idle {
+			batchesMu.Lock()
+			delete(batches, id)
+			batchesMu.Unlock()
+			reaped++
+		}
+	}
+	return reaped
+}
+
 // ── Incremental insert batches ────────────────────────────────────────────────
 
 // batchState is one open incremental insert; the driver socket is
 // returned to the driver pool at send or abort.
 type batchState struct {
-	mu     sync.Mutex
-	batch  driver.Batch
-	cancel context.CancelFunc
-	cols   []string
-	done   bool
+	mu       sync.Mutex
+	batch    driver.Batch
+	cancel   context.CancelFunc
+	cols     []string
+	done     bool
+	lastUsed time.Time
 }
 
 var (
@@ -816,7 +1013,7 @@ func clickhouse_batch_begin(table *C.zend_string, columns *C.zval, options *C.zv
 		return -1
 	}
 	// The context must outlive this call — it is cancelled at send/abort.
-	client, ctx, cancel, err := callSetup(options)
+	client, ctx, cancel, err := callSetup(options, false)
 	if err != nil {
 		setLastError(err.Error())
 		return -1
@@ -828,7 +1025,7 @@ func clickhouse_batch_begin(table *C.zend_string, columns *C.zval, options *C.zv
 		return -1
 	}
 
-	b := &batchState{batch: batch, cancel: cancel, cols: colNames}
+	b := &batchState{batch: batch, cancel: cancel, cols: colNames, lastUsed: time.Now()}
 	batchesMu.Lock()
 	batchSeq++
 	id := batchSeq
@@ -846,6 +1043,7 @@ func clickhouse_batch_append(id C.int64_t, values *C.zval) (ret unsafe.Pointer) 
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.lastUsed = time.Now()
 	if b.done {
 		return frankenphp.PHPString(fmt.Sprintf("ERROR: batch %d is closed", int64(id)), false)
 	}
@@ -869,6 +1067,7 @@ func clickhouse_batch_flush(id C.int64_t) (ret unsafe.Pointer) {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.lastUsed = time.Now()
 	if b.done {
 		return frankenphp.PHPString(fmt.Sprintf("ERROR: batch %d is closed", int64(id)), false)
 	}
@@ -923,7 +1122,7 @@ func clickhouse_batch_abort(id C.int64_t) (ret unsafe.Pointer) {
 //export clickhouse_async_insert
 func clickhouse_async_insert(query *C.zend_string, wait C.int, params *C.zval, options *C.zval) (ret unsafe.Pointer) {
 	defer phpPanicGuard(&ret)
-	client, ctx, cancel, err := callSetup(options)
+	client, ctx, cancel, err := callSetup(options, true)
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
 	}
@@ -946,11 +1145,12 @@ func clickhouse_async_insert(query *C.zend_string, wait C.int, params *C.zval, o
 // is returned to the driver pool when rows.Close() runs at exhaustion
 // or close.
 type cursorState struct {
-	mu     sync.Mutex
-	rows   driver.Rows
-	cancel context.CancelFunc
-	packer *rowPacker
-	done   bool
+	mu       sync.Mutex
+	rows     driver.Rows
+	cancel   context.CancelFunc
+	packer   *rowPacker
+	done     bool
+	lastUsed time.Time
 }
 
 var (
@@ -982,7 +1182,7 @@ func clickhouse_query_cursor(query *C.zend_string, params *C.zval, options *C.zv
 
 	// The context must outlive this call — it is cancelled when the
 	// cursor is exhausted or closed.
-	client, ctx, cancel, err := callSetup(options)
+	client, ctx, cancel, err := callSetup(options, false)
 	if err != nil {
 		setLastError(err.Error())
 		return -1
@@ -1001,7 +1201,7 @@ func clickhouse_query_cursor(query *C.zend_string, params *C.zval, options *C.zv
 		return -1
 	}
 
-	cur := &cursorState{rows: rows, cancel: cancel, packer: packer}
+	cur := &cursorState{rows: rows, cancel: cancel, packer: packer, lastUsed: time.Now()}
 	if packer == nil { // zero-column result: nothing to stream
 		cur.releaseResources()
 	}
@@ -1026,6 +1226,7 @@ func clickhouse_cursor_fetch(id C.int64_t, maxRows C.int64_t) (ret unsafe.Pointe
 
 	cur.mu.Lock()
 	defer cur.mu.Unlock()
+	cur.lastUsed = time.Now()
 	if cur.done {
 		return newResultArray(0)
 	}

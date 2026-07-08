@@ -861,6 +861,16 @@ func addAnyKV(arr *C.zend_array, k phpKey, v any) {
 		kvAddStr(arr, k, t.String())
 	case map[string]any:
 		kvAddArr(arr, k, (*C.zend_array)(buildAnyMap(t)))
+	case chcol.JSON:
+		// A nested object (e.g. an element of a JSON array of objects)
+		// surfaces as its own JSON value — recurse into its NestedMap.
+		kvAddArr(arr, k, (*C.zend_array)(buildAnyMap(t.NestedMap())))
+	case *chcol.JSON:
+		if t == nil {
+			kvAddNull(arr, k)
+			return
+		}
+		kvAddArr(arr, k, (*C.zend_array)(buildAnyMap(t.NestedMap())))
 	case []any:
 		sub := C.ch_new_array(C.uint32_t(len(t)))
 		for j, e := range t {

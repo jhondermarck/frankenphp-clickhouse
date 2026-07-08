@@ -165,6 +165,17 @@ rows are already on the server. Flat values and associative rows require
 `$columns` at `begin` (the INSERT statement is fixed there); nested rows
 without columns follow the table's DDL order.
 
+> **Always close handles.** Cursors and batches hold a pooled connection from
+> `open`/`begin` until `close`/`send`/`abort` — wrap them in `try`/`finally`.
+> In worker mode the process outlives requests, so a leaked handle pins a socket
+> until the pool is exhausted. A background reaper releases handles left idle for
+> more than 10 minutes as a safety net, but it is not a substitute for closing.
+
+> **Map / Array columns** accept native PHP arrays on write: an associative
+> array for `Map(K, V)`, a list for `Array(T)` (nested arrays too). The value is
+> coerced to the column's concrete type, so `['hits' => 42]` inserts cleanly into
+> `Map(String, UInt64)`.
+
 ### Async inserts (high-frequency small writes)
 
 For many small inserts where client-side batching isn't practical, let the
