@@ -1627,32 +1627,46 @@ eq($stClosed['handles']['cursors_open'], 0, 'cursors_open = 0 after close');
 
 suite('OO wrapper');
 
-require __DIR__ . '/../packages/oo/src/Cursor.php';
-require __DIR__ . '/../packages/oo/src/Batch.php';
-require __DIR__ . '/../packages/oo/src/ClickHouse.php';
-
-$ch = new \Jhondermarck\ClickHouse\ClickHouse(); // default connection already open
-eq($ch->query('SELECT 7 AS n')[0]['n'], 7, 'OO query()');
-
-$ch->exec("DROP TABLE IF EXISTS clickhousephp_oo_test");
-$ch->exec("CREATE TABLE clickhousephp_oo_test (id UInt32) ENGINE = Memory");
-$oob = $ch->batch('clickhousephp_oo_test', ['id']);
-$oob->append([[1], [2], [3]]);
-eq($oob->send(), 'Ok', 'OO batch send()');
-
-$collected = [];
-$oocur = $ch->cursor("SELECT id FROM clickhousephp_oo_test ORDER BY id");
-foreach ($oocur->rows(2) as $row) {   // 2-row chunks over 3 rows
-    $collected[] = $row['id'];
+// The OO package lives outside web/; resolve it from the repo layout (local
+// runs) or from /packages (the Docker image copies it there). Skip gracefully
+// if it isn't deployed alongside.
+$ooDir = null;
+foreach ([__DIR__ . '/../packages/oo/src', '/packages/oo/src'] as $cand) {
+    if (is_file("$cand/ClickHouse.php")) {
+        $ooDir = $cand;
+        break;
+    }
 }
-$oocur->close();
-eq($collected, [1, 2, 3], 'OO cursor rows() generator streams all rows');
+if ($ooDir === null) {
+    ok(true, 'OO package not deployed here — suite skipped');
+} else {
+    require "$ooDir/Cursor.php";
+    require "$ooDir/Batch.php";
+    require "$ooDir/ClickHouse.php";
 
-$metrics = \Jhondermarck\ClickHouse\ClickHouse::formatMetrics($ch->stats());
-ok(str_contains($metrics, 'clickhouse_queries_total'), 'formatMetrics emits a counter');
-ok(str_contains($metrics, 'clickhouse_build_info{server_version='), 'formatMetrics emits build_info');
+    $ch = new \Jhondermarck\ClickHouse\ClickHouse(); // default connection already open
+    eq($ch->query('SELECT 7 AS n')[0]['n'], 7, 'OO query()');
 
-$ch->exec("DROP TABLE IF EXISTS clickhousephp_oo_test");
+    $ch->exec("DROP TABLE IF EXISTS clickhousephp_oo_test");
+    $ch->exec("CREATE TABLE clickhousephp_oo_test (id UInt32) ENGINE = Memory");
+    $oob = $ch->batch('clickhousephp_oo_test', ['id']);
+    $oob->append([[1], [2], [3]]);
+    eq($oob->send(), 'Ok', 'OO batch send()');
+
+    $collected = [];
+    $oocur = $ch->cursor("SELECT id FROM clickhousephp_oo_test ORDER BY id");
+    foreach ($oocur->rows(2) as $row) {   // 2-row chunks over 3 rows
+        $collected[] = $row['id'];
+    }
+    $oocur->close();
+    eq($collected, [1, 2, 3], 'OO cursor rows() generator streams all rows');
+
+    $metrics = \Jhondermarck\ClickHouse\ClickHouse::formatMetrics($ch->stats());
+    ok(str_contains($metrics, 'clickhouse_queries_total'), 'formatMetrics emits a counter');
+    ok(str_contains($metrics, 'clickhouse_build_info{server_version='), 'formatMetrics emits build_info');
+
+    $ch->exec("DROP TABLE IF EXISTS clickhousephp_oo_test");
+}
 
 // =============================================================================
 // Cleanup

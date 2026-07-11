@@ -44,5 +44,8 @@ WORKDIR /app
 COPY docker/frankenphp/php.ini /usr/local/etc/php/php.ini
 
 COPY web /app
+# The optional OO package lives outside web/; the integration suite requires it
+# from ../packages, so make it resolvable at /packages inside the image.
+COPY packages /packages
 RUN composer install --no-dev
 RUN composer dump-autoload --optimize --apcu
