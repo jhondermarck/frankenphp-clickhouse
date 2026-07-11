@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Geo types** (read): `Point` → `[x, y]`, and `Ring`, `LineString`,
+  `Polygon`, `MultiPolygon`, `MultiLineString` as the corresponding nested
+  arrays of coordinate pairs. Also usable nested (`Array(Point)`, geo fields in
+  a `Tuple`).
+
 - **`clickhouse_stats(): array`** — a process-wide observability snapshot for
   health checks and leak diagnosis in worker mode: `connected`, process
   `uptime_seconds`, cached `server_version`, open-handle gauges

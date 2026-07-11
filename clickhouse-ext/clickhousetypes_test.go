@@ -161,6 +161,23 @@ func TestParseColMetaTuple(t *testing.T) {
 	}
 }
 
+func TestParseColMetaGeo(t *testing.T) {
+	for _, name := range []string{"Point", "Ring", "LineString", "Polygon", "MultiPolygon", "MultiLineString"} {
+		m, err := parseColMeta(name)
+		if err != nil {
+			t.Fatalf("parseColMeta(%q) error: %v", name, err)
+		}
+		if m.kind != kindGeo {
+			t.Errorf("parseColMeta(%q) kind = %d, want kindGeo", name, m.kind)
+		}
+	}
+	// Geo nested inside a composite still parses.
+	m, err := parseColMeta("Array(Point)")
+	if err != nil || m.kind != kindArray || m.inner == nil || m.inner.kind != kindGeo {
+		t.Errorf("Array(Point) parsed incorrectly: %+v (err %v)", m, err)
+	}
+}
+
 func TestSplitTupleField(t *testing.T) {
 	cases := []struct{ in, name, typ string }{
 		{"UInt8", "", "UInt8"},
@@ -251,6 +268,7 @@ func FuzzParseColMeta(f *testing.F) {
 		"JSON", "Int256", "FixedString(16)", "",
 		"Tuple(", "Map(", "Array(", "Tuple(,)", "`weird name` UInt8",
 		"Nullable(", "LowCardinality()", "Map(,)", "Tuple())(",
+		"Point", "Ring", "Polygon", "MultiPolygon", "Array(Point)", "Map(String, Point)",
 	}
 	for _, s := range seeds {
 		f.Add(s)

@@ -398,6 +398,74 @@ clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_tuple_write");
 clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_tuple_test");
 
 // =============================================================================
+// Geo types (Point, Ring, LineString, Polygon, MultiPolygon, MultiLineString)
+// =============================================================================
+
+suite('Geo types');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_geo_test");
+clickhouse_exec("CREATE TABLE clickhousephp_geo_test (
+    pt    Point,
+    rng   Ring,
+    ls    LineString,
+    poly  Polygon,
+    mpoly MultiPolygon,
+    mls   MultiLineString,
+    pts   Array(Point),
+    named Tuple(name String, loc Point)
+) ENGINE = Memory");
+
+clickhouse_exec("INSERT INTO clickhousephp_geo_test VALUES (
+    (10, 20),
+    [(0, 0), (1, 0), (1, 1), (0, 0)],
+    [(0, 0), (3, 4)],
+    [[(0, 0), (2, 0), (2, 2), (0, 2), (0, 0)]],
+    [[[(0, 0), (1, 0), (1, 1), (0, 0)]]],
+    [[(0, 0), (1, 1)], [(2, 2), (3, 3)]],
+    [(5, 6), (7, 8)],
+    ('site-A', (100, 200))
+)");
+
+$rows = clickhouse_query_array("SELECT * FROM clickhousephp_geo_test");
+eq(count($rows), 1, 'geo test row count = 1');
+$r = $rows[0];
+
+// Point → [x, y] indexed array of floats
+ok(is_array($r['pt']) && count($r['pt']) === 2, 'Point is a 2-element array');
+eq($r['pt'][0], 10.0, 'Point x = 10.0');
+eq($r['pt'][1], 20.0, 'Point y = 20.0');
+ok(is_float($r['pt'][0]), 'Point coord is PHP float');
+
+// Ring → array of points
+eq(count($r['rng']), 4, 'Ring has 4 points');
+eq($r['rng'][0], [0.0, 0.0], 'Ring[0] = [0,0]');
+eq($r['rng'][2], [1.0, 1.0], 'Ring[2] = [1,1]');
+
+// LineString → array of points
+eq($r['ls'][1], [3.0, 4.0], 'LineString[1] = [3,4]');
+
+// Polygon → array of rings (array of arrays of points)
+eq(count($r['poly']), 1, 'Polygon has 1 ring');
+eq(count($r['poly'][0]), 5, 'Polygon ring has 5 points');
+eq($r['poly'][0][1], [2.0, 0.0], 'Polygon[0][1] = [2,0]');
+
+// MultiPolygon → array of polygons
+eq($r['mpoly'][0][0][1], [1.0, 0.0], 'MultiPolygon[0][0][1] = [1,0]');
+
+// MultiLineString → array of linestrings
+eq(count($r['mls']), 2, 'MultiLineString has 2 lines');
+eq($r['mls'][1][0], [2.0, 2.0], 'MultiLineString[1][0] = [2,2]');
+
+// Array(Point) → array of points
+eq($r['pts'][1], [7.0, 8.0], 'Array(Point)[1] = [7,8]');
+
+// Point nested inside a named Tuple
+eq($r['named']['name'], 'site-A', 'Tuple field name = site-A');
+eq($r['named']['loc'], [100.0, 200.0], 'Tuple Point field = [100,200]');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_geo_test");
+
+// =============================================================================
 // clickhouse_exec — DDL et commandes
 // =============================================================================
 
@@ -802,21 +870,19 @@ eq($rows[1]['code'], 'ABC', 'FixedString(3) value');
 
 clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_edge_test");
 
-// Unsupported column type throws instead of returning an empty array
-clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_unsup_test");
-clickhouse_exec("CREATE TABLE clickhousephp_unsup_test (p Point) ENGINE = Memory");
-clickhouse_exec("INSERT INTO clickhousephp_unsup_test VALUES ((1.0, 2.0))");
+// Unsupported column type throws instead of returning an empty array.
+// INTERVAL yields an IntervalDay column, which the extension does not map —
+// no table or experimental setting needed.
 $unsupportedThrew = false;
 $unsupportedMsg = '';
 try {
-    clickhouse_query_array("SELECT * FROM clickhousephp_unsup_test");
+    clickhouse_query_array("SELECT INTERVAL 1 DAY AS ival");
 } catch (RuntimeException $e) {
     $unsupportedThrew = true;
     $unsupportedMsg = $e->getMessage();
 }
 ok($unsupportedThrew, 'unsupported column type throws RuntimeException');
 ok(str_contains($unsupportedMsg, 'unsupported type'), 'exception names the unsupported type', $unsupportedMsg);
-clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_unsup_test");
 
 // =============================================================================
 // Map(K, V) and nested arrays

@@ -37,6 +37,7 @@ const (
 	kindArray
 	kindMap
 	kindTuple
+	kindGeo
 )
 
 type colMeta struct {
@@ -240,6 +241,11 @@ strip:
 		k = kindBigInt
 	case "JSON":
 		k = kindJSON
+	case "Point", "Ring", "LineString", "Polygon", "MultiPolygon", "MultiLineString":
+		// Geo types are orb.* values: Point is [2]float64, the rest are
+		// slices nesting down to Point. One reflection-driven builder covers
+		// them all (see buildGeo), so no inner meta is needed.
+		k = kindGeo
 	default:
 		return colMeta{}, fmt.Errorf("unsupported type: %s", dbType)
 	}

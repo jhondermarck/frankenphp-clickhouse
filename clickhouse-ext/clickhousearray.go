@@ -476,7 +476,38 @@ func packCol(
 		arr := buildTuple(reflect.ValueOf(dest).Elem(), &m)
 		uvals[i] = C.uint64_t(uintptr(arr))
 		types[i] = chArray
+	case kindGeo:
+		arr := buildGeo(reflect.ValueOf(dest).Elem())
+		uvals[i] = C.uint64_t(uintptr(arr))
+		types[i] = chArray
 	}
+}
+
+// buildGeo converts an orb.* geo value into a nested PHP array. A Point is a
+// [2]float64 (Go array) → [x, y]; every other geo type is a slice nesting down
+// to Point (Ring/LineString → [][2], Polygon/MultiLineString → [][][2],
+// MultiPolygon → [][][][2]). The Go value's kind — array vs slice — drives the
+// recursion, so all six types share this one builder.
+func buildGeo(v reflect.Value) unsafe.Pointer {
+	for v.Kind() == reflect.Interface || v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return unsafe.Pointer(C.ch_new_array(0))
+		}
+		v = v.Elem()
+	}
+	if v.Kind() == reflect.Array { // Point: [x, y]
+		arr := C.ch_new_array(C.uint32_t(v.Len()))
+		for i := 0; i < v.Len(); i++ {
+			C.ch_arr_add_double(arr, C.double(v.Index(i).Float()))
+		}
+		return unsafe.Pointer(arr)
+	}
+	n := v.Len() // Ring/LineString/Polygon/MultiPolygon/MultiLineString
+	arr := C.ch_new_array(C.uint32_t(n))
+	for i := 0; i < n; i++ {
+		C.ch_arr_add_arr(arr, (*C.zend_array)(buildGeo(v.Index(i))))
+	}
+	return unsafe.Pointer(arr)
 }
 
 // ── Array builder ────────────────────────────────────────────────────────────
@@ -489,8 +520,8 @@ func buildPHPArray(dest interface{}, inner *colMeta) unsafe.Pointer {
 	if inner == nil {
 		return unsafe.Pointer(C.ch_new_array(0))
 	}
-	// Nested arrays, maps and tuples have no typed fast path — go generic.
-	if inner.kind == kindArray || inner.kind == kindMap || inner.kind == kindTuple {
+	// Nested arrays, maps, tuples and geo have no typed fast path — go generic.
+	if inner.kind == kindArray || inner.kind == kindMap || inner.kind == kindTuple || inner.kind == kindGeo {
 		return buildReflectArray(reflect.ValueOf(dest).Elem(), inner)
 	}
 	if inner.nullable {
@@ -993,6 +1024,8 @@ func buildReflectArray(v reflect.Value, elem *colMeta) unsafe.Pointer {
 			C.ch_arr_add_arr(arr, (*C.zend_array)(buildReflectMap(e, elem)))
 		case kindTuple:
 			C.ch_arr_add_arr(arr, (*C.zend_array)(buildTuple(e, elem)))
+		case kindGeo:
+			C.ch_arr_add_arr(arr, (*C.zend_array)(buildGeo(e)))
 		case kindString:
 			arrAddStr(arr, e.String())
 		case kindInt8, kindInt16, kindInt32, kindInt64:
@@ -1059,6 +1092,8 @@ func buildReflectMap(v reflect.Value, m *colMeta) unsafe.Pointer {
 			kvAddArr(arr, k, (*C.zend_array)(buildReflectMap(e, val)))
 		case kindTuple:
 			kvAddArr(arr, k, (*C.zend_array)(buildTuple(e, val)))
+		case kindGeo:
+			kvAddArr(arr, k, (*C.zend_array)(buildGeo(e)))
 		case kindString:
 			kvAddStr(arr, k, e.String())
 		case kindInt8, kindInt16, kindInt32, kindInt64:
@@ -1146,6 +1181,8 @@ func addTupleField(arr *C.zend_array, k phpKey, e reflect.Value, m *colMeta) {
 		kvAddArr(arr, k, (*C.zend_array)(buildReflectMap(e, m)))
 	case kindTuple:
 		kvAddArr(arr, k, (*C.zend_array)(buildTuple(e, m)))
+	case kindGeo:
+		kvAddArr(arr, k, (*C.zend_array)(buildGeo(e)))
 	case kindJSON:
 		// JSON inside a tuple surfaces as chcol.JSON — reuse the dynamic walker.
 		addAnyKV(arr, k, e.Interface(), 0)
