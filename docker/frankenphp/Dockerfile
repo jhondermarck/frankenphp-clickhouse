@@ -23,7 +23,7 @@ FROM dunglas/frankenphp AS php-base
 
 COPY --from=builder /frankenphp /usr/local/bin/frankenphp
 
-RUN apt update && apt install -y libnss3-tools
+RUN apt update && apt install -y libnss3-tools curl
 RUN install-php-extensions \
     intl \
     zip \

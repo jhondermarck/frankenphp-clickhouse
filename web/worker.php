@@ -44,6 +44,12 @@ while (frankenphp_handle_request(function () use ($query): void {
     header('Content-Type: application/json');
 
     match ($uri) {
+        // Liveness probe: proves the worker loop is serving requests, without
+        // depending on ClickHouse (used by the compose healthcheck).
+        '/healthz' => (function (): void {
+            echo json_encode(['status' => 'ok']);
+        })(),
+
         '/query_array' => (function () use ($query): void {
             $rows = clickhouse_query_array($query);
             echo json_encode(['rows' => count($rows)]);

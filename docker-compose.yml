@@ -19,6 +19,15 @@ services:
     environment:
       - CH_DSN=clickhouse://default:${CLICKHOUSE_PASSWORD:-strongpassword}@clickhouse:9000/events_bench?secure=false&timeout=30s
     command: sh -c '[ -f /app/.env ] || cp /app/.env.example /app/.env && frankenphp run --config /etc/caddy/Caddyfile'
+    # Explicit healthcheck: the base image's default probes the Caddy admin API
+    # (:2019), which the Caddyfile disables (`admin off`) — so `compose --wait`
+    # would never see this service healthy. Probe the app's /healthz instead.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
     depends_on:
       clickhouse:
         condition: service_healthy
