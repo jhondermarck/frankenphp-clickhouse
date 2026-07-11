@@ -112,6 +112,7 @@ clickhouse_batch_abort(int $batch): string
 clickhouse_async_insert(string $query, bool $wait = true, ?array $params = null, ?array $options = null): string
 clickhouse_ping(?int $connection = null): string
 clickhouse_server_version(?int $connection = null): string
+clickhouse_stats(): array
 clickhouse_disconnect(): string
 ```
 
@@ -294,11 +295,16 @@ clickhouse_disconnect();
 | `JSON` | `array` | Nested PHP array; dynamic leaf types mapped like their column equivalents |
 | `Enum8`, `Enum16` | `string` | Enum name (e.g. `"active"`) |
 | `Nullable(T)` | `T` or `null` | Any supported type |
-| `Array(T)` | `array` | Indexed PHP array, any inner type incl. `Array(Array(T))` and `Array(Map(K, V))` |
+| `Array(T)` | `array` | Indexed PHP array, any inner type incl. `Array(Array(T))`, `Array(Map(K, V))` and `Array(Tuple(…))` |
 | `Map(K, V)` | `array` | Keyed PHP array — `int` keys for integer `K`, `string` otherwise; keys sorted |
+| `Tuple(…)` | `array` | Named tuple → assoc array keyed by field name; unnamed tuple → indexed array in field order. Any field type, incl. nested tuples/arrays/maps. Reads and writes. |
+| `Nested(…)` | `array` | Via its `Array(T)` sub-columns (default `flatten_nested=1`), or as `Array(Tuple(…))` when `flatten_nested=0` |
 | `LowCardinality(T)` | same as `T` | Transparent wrapper, incl. `LowCardinality(Nullable(T))` |
 
-Types not listed above (Tuple, Dynamic, Variant, Geo…) are not yet supported and will throw a `RuntimeException`.
+Types not listed above (Dynamic, Variant, Geo…) are not yet supported and will throw a `RuntimeException`.
+
+Tuple values also round-trip on write: pass a nested PHP list for an unnamed
+`Tuple(…)`, or an associative array (keyed by field name) for a named one.
 
 ## DSN Format
 
@@ -364,20 +370,83 @@ while (frankenphp_handle_request(function () use ($query): void {
 clickhouse_disconnect();
 ```
 
+## Observability
+
+`clickhouse_stats()` returns a process-wide snapshot — cheap (no server
+round-trip) and safe to expose on a health-check endpoint. In worker mode the
+process is long-lived, so this is the fastest way to spot a leaked cursor/batch
+(the [leak warning](#incremental-batches-unbounded-size-writes) above) or a
+saturated driver pool.
+
+```php
+$s = clickhouse_stats();
+// [
+//   'connected'         => 1,
+//   'uptime_seconds'    => 3600,
+//   'server_version'    => '26.5.5',   // cached from the handshake
+//   'named_connections' => 0,          // extra clickhouse_open() handles
+//   'handles' => [
+//     'cursors_open'     => 0,         // ← climbing = leaked cursors
+//     'batches_open'     => 0,         // ← climbing = leaked batches
+//     'idle_ttl_seconds' => 600,       // reaper threshold
+//     'last_reap_unix'   => 1720000000,
+//     'last_reap_count'  => 0,
+//   ],
+//   'pool' => [                        // driver pool gauges (empty if not connected)
+//     'open' => 1, 'idle' => 1, 'max_open_conns' => 10, 'max_idle_conns' => 5,
+//   ],
+//   'counters' => [                    // lifetime totals since process boot
+//     'queries' => 42, 'inserts' => 7, 'execs' => 3, 'async_inserts' => 0,
+//     'cursors_opened' => 5, 'batches_opened' => 2, 'errors' => 1,
+//   ],
+// ]
+
+if ($s['handles']['cursors_open'] > 100) {
+    error_log("clickhouse: {$s['handles']['cursors_open']} cursors open — leak?");
+}
+```
+
 ## Testing
 
 ```bash
-make test      # PHP integration tests (296 assertions)
-make test_go   # Go unit tests (incl. a race-tested concurrency stress test)
+make test             # PHP integration tests (337 assertions)
+make test_go          # Go unit tests (incl. a race-tested concurrency stress test)
+make test_resilience  # Restart ClickHouse, verify the pool transparently redials
+```
+
+The type parser is also fuzzed (crashers are kept as regression seeds):
+
+```bash
+go test -C clickhouse-ext -run=xxx -fuzz=FuzzParseColMeta -fuzztime=30s .
 ```
 
 The test suite covers:
 - **SELECT / cursor**: query_array and streaming cursors return correct PHP arrays for every supported type
-- **INSERT / batch / async**: all write paths with value verification, including Map/Array (and nullable) columns
-- **Types**: numeric, String/FixedString/Enum, Date*/DateTime*, UUID, IPv4/6, Decimal, Bool, Nullable, LowCardinality, Array, Map, Int128/256, JSON
+- **INSERT / batch / async**: all write paths with value verification, including Map/Array/Tuple (and nullable) columns
+- **Types**: numeric, String/FixedString/Enum, Date*/DateTime*, UUID, IPv4/6, Decimal, Bool, Nullable, LowCardinality, Array, Map, Tuple (named/unnamed/nested, incl. `Array(Tuple)` and `Map(_, Tuple)`), Int128/256, JSON
 - **Options**: per-call settings / query_id / timeout, multiple connections, ClickHouse error codes via `getCode()`
 - **Exceptions**: RuntimeException on bad query, bad DSN, not connected, closed handles
+- **Observability**: `clickhouse_stats` shape, counter deltas, open-handle gauge
 - **Memory leaks**: repeated query/insert/exec with no growth
+
+## Install
+
+Each tagged release ships pre-built artifacts, so most users don't need the
+build toolchain:
+
+- **Docker image** (`linux/amd64` + `linux/arm64`) — mount your app into `/app`:
+  ```bash
+  docker run -v "$PWD/app:/app" ghcr.io/jhondermarck/frankenphp-clickhouse
+  ```
+- **Standalone binaries** — download `frankenphp-clickhouse-linux-<arch>` (and
+  its `.sha256`) from the [Releases](https://github.com/jhondermarck/frankenphp-clickhouse/releases) page.
+
+Editor autocompletion for the `clickhouse_*` functions comes from a stubs
+package (IDE-only, not loaded at runtime):
+
+```bash
+composer require --dev jhondermarck/frankenphp-clickhouse-stubs
+```
 
 ## Build
 
@@ -431,16 +500,21 @@ clickhouse-ext/
   clickhousephp.h         # C header — hand-maintained
   clickhousephp_arginfo.h # PHP argument info — hand-maintained
   clickhousephp.stub.php  # PHP function signatures — hand-maintained
-  clickhousetypes_test.go # Go unit tests (types, reaper, concurrency)
+  stats.go                # Runtime counters + clickhouse_stats state
+  clickhousetypes_test.go # Go unit tests + FuzzParseColMeta (types, reaper, concurrency)
   go.mod                  # Go module (imported by Docker / xcaddy)
 web/
   test.php                # PHP integration tests
+  resilience.php          # Reconnection test (make test_resilience)
   bench.php               # INSERT + SELECT benchmark vs SMI2
   worker.php              # FrankenPHP worker (persistent connection + retry)
-docker/                   # Docker config (ClickHouse, FrankenPHP)
+examples/
+  etl_export.php          # Streaming cursor → batch table copy (bounded memory)
+stubs/                    # Composer IDE stubs package (clickhouse_* signatures)
+docker/                   # Docker config: dev stack + docker/release/ (distributable image)
 sample/                   # Standalone production Dockerfile
 docs/                     # Migration guide (smi2 → native)
-.github/workflows/        # CI: Go tests, PHP tests, build
+.github/workflows/        # CI: Go tests, PHP tests, build; release (binaries + GHCR image)
 Makefile
 ```
 

@@ -6,6 +6,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`clickhouse_stats(): array`** — a process-wide observability snapshot for
+  health checks and leak diagnosis in worker mode: `connected`, process
+  `uptime_seconds`, cached `server_version`, open-handle gauges
+  (`cursors_open` / `batches_open`) with reaper state, driver-pool gauges
+  (`open` / `idle` / `max_*`), and lifetime counters (`queries`, `inserts`,
+  `execs`, `async_inserts`, `cursors_opened`, `batches_opened`, `errors`).
+  No server round-trip.
+- **`Tuple(…)` type** (read and write): named tuples map to associative PHP
+  arrays keyed by field name, unnamed tuples to indexed arrays in field order.
+  Fields may be any supported type, including nested tuples, `Array(Tuple)` and
+  `Map(K, Tuple)`. This also covers `Nested(…)` columns when `flatten_nested=0`
+  (represented as `Array(Tuple(…))`).
+- **Release automation** (`.github/workflows/release.yml`): pushing a `v*` tag
+  publishes standalone FrankenPHP binaries (`linux/amd64` + `linux/arm64`) as
+  release assets with SHA-256 sums, and a multi-arch Docker image to
+  `ghcr.io/jhondermarck/frankenphp-clickhouse` (`docker/release/Dockerfile`).
+- **IDE stubs package** (`stubs/`) — `jhondermarck/frankenphp-clickhouse-stubs`,
+  fully documented signatures for editor autocompletion and static analysis.
+- **ETL example** (`examples/etl_export.php`) — a bounded-memory streaming
+  cursor → batch table copy.
+- **Fuzz target** `FuzzParseColMeta` for the column-type parser, and
+  `make test_resilience` verifying the connection pool redials transparently
+  after a ClickHouse restart.
+
+### Fixed
+
+- **Type parser crash on malformed names** (found by fuzzing): `Array(` with no
+  closing paren, and a backtick-quoted tuple field name like `` Tuple(``) ``,
+  caused an out-of-bounds slice panic in `parseColMeta`. Both now return an
+  error / parse cleanly; the crashers are kept as regression seeds.
+
 ## [0.1.0] - 2026-07-08
 
 First public release: a native PHP extension for FrankenPHP that talks to

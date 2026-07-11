@@ -43,6 +43,7 @@ func clickhouse_connect(dsn *C.zend_string) (ret unsafe.Pointer) {
 	pool = conn
 	connTimeout = timeout
 	poolMu.Unlock()
+	cacheServerVersion(conn)
 	// Closing the previous pool outside the lock; its open cursors and
 	// batches fail on their next operation, same as before.
 	if old != nil {

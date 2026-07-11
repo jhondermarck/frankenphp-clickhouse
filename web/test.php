@@ -314,6 +314,90 @@ eq(count($r['labels']), 0, 'empty Array(Nullable(String)) has 0 elements');
 clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_array_test");
 
 // =============================================================================
+// Tuple types (named, unnamed, nested, Array(Tuple), Map(_, Tuple))
+// =============================================================================
+
+suite('Tuple types');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_tuple_test");
+clickhouse_exec("CREATE TABLE clickhousephp_tuple_test (
+    unnamed  Tuple(UInt32, String),
+    named    Tuple(id UInt64, label String, ts DateTime),
+    nested   Tuple(inner Tuple(x Int32, y Int32), tags Array(String)),
+    nul      Tuple(a Nullable(String), b Nullable(Int64)),
+    arr_tup  Array(Tuple(k String, v UInt32)),
+    map_tup  Map(String, Tuple(lo Int32, hi Int32))
+) ENGINE = Memory");
+
+clickhouse_exec("INSERT INTO clickhousephp_tuple_test VALUES
+    ((42, 'hello'),
+     (7, 'seven', '2024-01-15 08:30:00'),
+     ((1, 2), ['a', 'b']),
+     ('present', NULL),
+     [('x', 1), ('y', 2)],
+     {'range': (10, 20)})
+");
+
+$rows = clickhouse_query_array("SELECT * FROM clickhousephp_tuple_test");
+eq(count($rows), 1, 'tuple test row count = 1');
+$r = $rows[0];
+
+// Unnamed tuple → indexed array in field order
+ok(is_array($r['unnamed']), 'unnamed Tuple is PHP array');
+eq($r['unnamed'][0], 42, 'unnamed Tuple[0] = 42');
+ok(is_int($r['unnamed'][0]), 'unnamed Tuple[0] is PHP int');
+eq($r['unnamed'][1], 'hello', 'unnamed Tuple[1] = hello');
+
+// Named tuple → associative array keyed by field name
+ok(is_array($r['named']), 'named Tuple is PHP array');
+eq($r['named']['id'], 7, 'named Tuple.id = 7');
+eq($r['named']['label'], 'seven', 'named Tuple.label = seven');
+eq($r['named']['ts'], '2024-01-15 08:30:00', 'named Tuple.ts DateTime formatted Y-m-d H:i:s');
+
+// Nested tuple + array field inside a tuple
+eq($r['nested']['inner']['x'], 1, 'nested Tuple.inner.x = 1');
+eq($r['nested']['inner']['y'], 2, 'nested Tuple.inner.y = 2');
+ok(is_array($r['nested']['tags']), 'nested Tuple.tags is PHP array');
+eq($r['nested']['tags'][0], 'a', 'nested Tuple.tags[0] = a');
+eq($r['nested']['tags'][1], 'b', 'nested Tuple.tags[1] = b');
+
+// Nullable fields inside a tuple
+eq($r['nul']['a'], 'present', 'Tuple Nullable(String) a = present');
+ok($r['nul']['b'] === null, 'Tuple Nullable(Int64) b = NULL');
+
+// Array(Tuple)
+ok(is_array($r['arr_tup']), 'Array(Tuple) is PHP array');
+eq(count($r['arr_tup']), 2, 'Array(Tuple) has 2 elements');
+eq($r['arr_tup'][0]['k'], 'x', 'Array(Tuple)[0].k = x');
+eq($r['arr_tup'][0]['v'], 1, 'Array(Tuple)[0].v = 1');
+eq($r['arr_tup'][1]['k'], 'y', 'Array(Tuple)[1].k = y');
+eq($r['arr_tup'][1]['v'], 2, 'Array(Tuple)[1].v = 2');
+
+// Map(String, Tuple)
+ok(is_array($r['map_tup']), 'Map(String, Tuple) is PHP array');
+eq($r['map_tup']['range']['lo'], 10, 'Map(String, Tuple)[range].lo = 10');
+eq($r['map_tup']['range']['hi'], 20, 'Map(String, Tuple)[range].hi = 20');
+
+// Write path: unnamed tuple as a nested list, named tuple as an assoc array.
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_tuple_write");
+clickhouse_exec("CREATE TABLE clickhousephp_tuple_write (
+    u Tuple(UInt32, String),
+    n Tuple(id UInt64, label String)
+) ENGINE = Memory");
+$w = clickhouse_insert('clickhousephp_tuple_write',
+    [[[42, 'hello'], ['id' => 7, 'label' => 'seven']]],
+    ['u', 'n']);
+eq($w, 'Ok', 'insert Tuple columns returns Ok');
+$wr = clickhouse_query_array("SELECT * FROM clickhousephp_tuple_write");
+eq($wr[0]['u'][0], 42, 'written unnamed Tuple[0] round-trips');
+eq($wr[0]['u'][1], 'hello', 'written unnamed Tuple[1] round-trips');
+eq($wr[0]['n']['id'], 7, 'written named Tuple.id round-trips');
+eq($wr[0]['n']['label'], 'seven', 'written named Tuple.label round-trips');
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_tuple_write");
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_tuple_test");
+
+// =============================================================================
 // clickhouse_exec — DDL et commandes
 // =============================================================================
 
@@ -720,8 +804,8 @@ clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_edge_test");
 
 // Unsupported column type throws instead of returning an empty array
 clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_unsup_test");
-clickhouse_exec("CREATE TABLE clickhousephp_unsup_test (t Tuple(UInt8, String)) ENGINE = Memory");
-clickhouse_exec("INSERT INTO clickhousephp_unsup_test VALUES ((1, 'x'))");
+clickhouse_exec("CREATE TABLE clickhousephp_unsup_test (p Point) ENGINE = Memory");
+clickhouse_exec("INSERT INTO clickhousephp_unsup_test VALUES ((1.0, 2.0))");
 $unsupportedThrew = false;
 $unsupportedMsg = '';
 try {
@@ -1433,6 +1517,43 @@ ok($optThrew, 'explicit per-call timeout still aborts a slow cursor');
 
 clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_life_test");
 clickhouse_connect($dsn); // restore the default connection
+
+// =============================================================================
+// clickhouse_stats — runtime observability
+// =============================================================================
+
+suite('clickhouse_stats');
+
+$st = clickhouse_stats();
+ok(is_array($st), 'stats returns a PHP array');
+eq($st['connected'], 1, 'connected = 1 while connected');
+ok(is_array($st['handles']) && is_array($st['pool']) && is_array($st['counters']),
+    'stats has handles / pool / counters sections');
+ok(is_string($st['server_version']) && $st['server_version'] !== '', 'server_version is a non-empty string');
+ok(is_int($st['uptime_seconds']) && $st['uptime_seconds'] >= 0, 'uptime_seconds is a non-negative int');
+eq($st['handles']['idle_ttl_seconds'], 600, 'handles.idle_ttl_seconds = 600 (10 min)');
+ok($st['pool']['max_open_conns'] >= 1, 'pool.max_open_conns is set');
+
+// Counters increment monotonically.
+$q0 = $st['counters']['queries'];
+clickhouse_query_array("SELECT 1");
+clickhouse_query_array("SELECT 2");
+$st2 = clickhouse_stats();
+eq($st2['counters']['queries'], $q0 + 2, 'queries counter increments by 2');
+
+// A failed query bumps the error counter.
+$e0 = $st2['counters']['errors'];
+try { clickhouse_query_array("SELECT * FROM clickhousephp_no_such_table_stats"); } catch (RuntimeException $e) {}
+$st3 = clickhouse_stats();
+eq($st3['counters']['errors'], $e0 + 1, 'errors counter increments on failure');
+
+// Open handles are reflected as a gauge and drop back after close.
+$openCursor = clickhouse_query_cursor("SELECT number FROM system.numbers LIMIT 3");
+$stOpen = clickhouse_stats();
+eq($stOpen['handles']['cursors_open'], 1, 'cursors_open = 1 with a live cursor');
+clickhouse_cursor_close($openCursor);
+$stClosed = clickhouse_stats();
+eq($stClosed['handles']['cursors_open'], 0, 'cursors_open = 0 after close');
 
 // =============================================================================
 // Cleanup

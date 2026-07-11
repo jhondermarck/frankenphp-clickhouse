@@ -183,6 +183,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -471,6 +472,10 @@ func packCol(
 		arr := buildReflectMap(reflect.ValueOf(dest).Elem(), &m)
 		uvals[i] = C.uint64_t(uintptr(arr))
 		types[i] = chArray
+	case kindTuple:
+		arr := buildTuple(reflect.ValueOf(dest).Elem(), &m)
+		uvals[i] = C.uint64_t(uintptr(arr))
+		types[i] = chArray
 	}
 }
 
@@ -484,8 +489,8 @@ func buildPHPArray(dest interface{}, inner *colMeta) unsafe.Pointer {
 	if inner == nil {
 		return unsafe.Pointer(C.ch_new_array(0))
 	}
-	// Nested arrays and maps have no typed fast path — go generic.
-	if inner.kind == kindArray || inner.kind == kindMap {
+	// Nested arrays, maps and tuples have no typed fast path — go generic.
+	if inner.kind == kindArray || inner.kind == kindMap || inner.kind == kindTuple {
 		return buildReflectArray(reflect.ValueOf(dest).Elem(), inner)
 	}
 	if inner.nullable {
@@ -986,6 +991,8 @@ func buildReflectArray(v reflect.Value, elem *colMeta) unsafe.Pointer {
 			C.ch_arr_add_arr(arr, (*C.zend_array)(buildReflectArray(e, elem.inner)))
 		case kindMap:
 			C.ch_arr_add_arr(arr, (*C.zend_array)(buildReflectMap(e, elem)))
+		case kindTuple:
+			C.ch_arr_add_arr(arr, (*C.zend_array)(buildTuple(e, elem)))
 		case kindString:
 			arrAddStr(arr, e.String())
 		case kindInt8, kindInt16, kindInt32, kindInt64:
@@ -1050,6 +1057,8 @@ func buildReflectMap(v reflect.Value, m *colMeta) unsafe.Pointer {
 			kvAddArr(arr, k, (*C.zend_array)(buildReflectArray(e, val.inner)))
 		case kindMap:
 			kvAddArr(arr, k, (*C.zend_array)(buildReflectMap(e, val)))
+		case kindTuple:
+			kvAddArr(arr, k, (*C.zend_array)(buildTuple(e, val)))
 		case kindString:
 			kvAddStr(arr, k, e.String())
 		case kindInt8, kindInt16, kindInt32, kindInt64:
@@ -1069,6 +1078,163 @@ func buildReflectMap(v reflect.Value, m *colMeta) unsafe.Pointer {
 		}
 	}
 	return unsafe.Pointer(arr)
+}
+
+// buildTuple converts a scanned Tuple value into a PHP array. Named tuples
+// (driver ScanType map[string]any) become an associative array keyed by field
+// name; unnamed tuples (ScanType []any) become an indexed array in field
+// order. Each field is rendered per its own colMeta, so a DateTime field
+// formats like a DateTime column, a nested Array like an Array column, etc.
+func buildTuple(v reflect.Value, m *colMeta) unsafe.Pointer {
+	for v.Kind() == reflect.Interface || v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return unsafe.Pointer(C.ch_new_array(0))
+		}
+		v = v.Elem()
+	}
+	arr := C.ch_new_array(C.uint32_t(len(m.fields)))
+	for i := range m.fields {
+		f := &m.fields[i]
+		if m.named {
+			k := phpKey{s: f.name}
+			var e reflect.Value
+			if v.Kind() == reflect.Map {
+				e = v.MapIndex(reflect.ValueOf(f.name))
+			}
+			if !e.IsValid() {
+				kvAddNull(arr, k)
+				continue
+			}
+			addTupleField(arr, k, e, &f.meta)
+		} else {
+			k := phpKey{isInt: true, i: int64(i)}
+			if v.Kind() != reflect.Slice || i >= v.Len() {
+				kvAddNull(arr, k)
+				continue
+			}
+			addTupleField(arr, k, v.Index(i), &f.meta)
+		}
+	}
+	return unsafe.Pointer(arr)
+}
+
+// addTupleField inserts one tuple field value e under key k, formatting it
+// per its colMeta. Mirrors the element switches in buildReflectArray /
+// buildReflectMap but drives insertion through the phpKey helpers so it
+// serves both named (string keys) and unnamed (int keys) tuples.
+func addTupleField(arr *C.zend_array, k phpKey, e reflect.Value, m *colMeta) {
+	if e.Kind() == reflect.Interface {
+		e = e.Elem()
+	}
+	if m.nullable {
+		if !e.IsValid() || (e.Kind() == reflect.Pointer && e.IsNil()) {
+			kvAddNull(arr, k)
+			return
+		}
+		if e.Kind() == reflect.Pointer {
+			e = e.Elem()
+		}
+	}
+	if !e.IsValid() {
+		kvAddNull(arr, k)
+		return
+	}
+	switch m.kind {
+	case kindArray:
+		kvAddArr(arr, k, (*C.zend_array)(buildReflectArray(e, m.inner)))
+	case kindMap:
+		kvAddArr(arr, k, (*C.zend_array)(buildReflectMap(e, m)))
+	case kindTuple:
+		kvAddArr(arr, k, (*C.zend_array)(buildTuple(e, m)))
+	case kindJSON:
+		// JSON inside a tuple surfaces as chcol.JSON — reuse the dynamic walker.
+		addAnyKV(arr, k, e.Interface(), 0)
+	case kindString:
+		kvAddStr(arr, k, e.String())
+	case kindInt8, kindInt16, kindInt32, kindInt64:
+		kvAddLong(arr, k, e.Int())
+	case kindUInt8, kindUInt16, kindUInt32, kindUInt64:
+		kvAddULong(arr, k, e.Uint())
+	case kindFloat32, kindFloat64:
+		kvAddDouble(arr, k, e.Float())
+	case kindBool:
+		if e.Bool() {
+			kvAddULong(arr, k, 1)
+		} else {
+			kvAddULong(arr, k, 0)
+		}
+	default: // DateTime*, UUID, IP, Decimal, BigInt → formatted strings
+		kvAddStr(arr, k, reflectScalarString(e, m))
+	}
+}
+
+// ── Runtime stats snapshot ─────────────────────────────────────────────────
+//
+// Lives here (not stats.go) because it builds a PHP array through the cgo
+// helpers above, which are file-static. The counter state it reads is defined
+// in stats.go.
+
+//export clickhouse_stats
+func clickhouse_stats() (ret unsafe.Pointer) {
+	defer nullPanicGuard(&ret)
+
+	root := C.ch_new_array(6)
+
+	poolMu.Lock()
+	p := pool
+	poolMu.Unlock()
+	connected := p != nil
+
+	kvAddLong(root, phpKey{s: "connected"}, boolToInt(connected))
+	kvAddLong(root, phpKey{s: "uptime_seconds"}, int64(time.Since(processStart).Seconds()))
+	serverVerMu.Lock()
+	sv := serverVer
+	serverVerMu.Unlock()
+	kvAddStr(root, phpKey{s: "server_version"}, sv)
+
+	connsMu.Lock()
+	nconn := int64(len(conns))
+	connsMu.Unlock()
+	kvAddLong(root, phpKey{s: "named_connections"}, nconn)
+
+	// Open handles + reaper state — the primary leak signal.
+	cursorsMu.Lock()
+	nCursors := int64(len(cursors))
+	cursorsMu.Unlock()
+	batchesMu.Lock()
+	nBatches := int64(len(batches))
+	batchesMu.Unlock()
+	h := C.ch_new_array(5)
+	kvAddLong(h, phpKey{s: "cursors_open"}, nCursors)
+	kvAddLong(h, phpKey{s: "batches_open"}, nBatches)
+	kvAddLong(h, phpKey{s: "idle_ttl_seconds"}, int64(handleIdleTTL.Seconds()))
+	kvAddLong(h, phpKey{s: "last_reap_unix"}, atomic.LoadInt64(&statLastReapUnix))
+	kvAddLong(h, phpKey{s: "last_reap_count"}, atomic.LoadInt64(&statLastReapCount))
+	kvAddArr(root, phpKey{s: "handles"}, h)
+
+	// Driver pool gauges (empty object when not connected).
+	pl := C.ch_new_array(4)
+	if connected {
+		s := p.Stats()
+		kvAddLong(pl, phpKey{s: "open"}, int64(s.Open))
+		kvAddLong(pl, phpKey{s: "idle"}, int64(s.Idle))
+		kvAddLong(pl, phpKey{s: "max_open_conns"}, int64(s.MaxOpenConns))
+		kvAddLong(pl, phpKey{s: "max_idle_conns"}, int64(s.MaxIdleConns))
+	}
+	kvAddArr(root, phpKey{s: "pool"}, pl)
+
+	// Lifetime counters since process boot.
+	c := C.ch_new_array(7)
+	kvAddLong(c, phpKey{s: "queries"}, atomic.LoadInt64(&statQueries))
+	kvAddLong(c, phpKey{s: "inserts"}, atomic.LoadInt64(&statInserts))
+	kvAddLong(c, phpKey{s: "execs"}, atomic.LoadInt64(&statExecs))
+	kvAddLong(c, phpKey{s: "async_inserts"}, atomic.LoadInt64(&statAsyncInserts))
+	kvAddLong(c, phpKey{s: "cursors_opened"}, atomic.LoadInt64(&statCursorsOpened))
+	kvAddLong(c, phpKey{s: "batches_opened"}, atomic.LoadInt64(&statBatchesOpened))
+	kvAddLong(c, phpKey{s: "errors"}, atomic.LoadInt64(&statErrors))
+	kvAddArr(root, phpKey{s: "counters"}, c)
+
+	return unsafe.Pointer(root)
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────

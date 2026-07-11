@@ -41,3 +41,5 @@ function clickhouse_async_insert(string $query, bool $wait = true, ?array $param
 function clickhouse_open(string $dsn): int {}
 
 function clickhouse_close(int $connection): string {}
+
+function clickhouse_stats(): array {}

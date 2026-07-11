@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -30,6 +31,7 @@ func chErrorCode(err error) int32 {
 // server error code is encoded as ERROR[code]: and surfaces as the
 // RuntimeException code in the C bridge.
 func chError(prefix string, err error) unsafe.Pointer {
+	atomic.AddInt64(&statErrors, 1)
 	if code := chErrorCode(err); code != 0 {
 		return frankenphp.PHPString(fmt.Sprintf("ERROR[%d]: %s%s", code, prefix, err.Error()), false)
 	}
@@ -172,6 +174,7 @@ func idPanicGuard(ret *C.int64_t) {
 // happen on the same worker thread, so concurrent requests never see each
 // other's message or code.
 func setLastError(msg string) {
+	atomic.AddInt64(&statErrors, 1)
 	cmsg := C.CString(msg)
 	C.ch_set_last_error(cmsg, 0)
 	C.free(unsafe.Pointer(cmsg))
@@ -179,6 +182,7 @@ func setLastError(msg string) {
 
 // setChError records a driver error with its ClickHouse server code.
 func setChError(prefix string, err error) {
+	atomic.AddInt64(&statErrors, 1)
 	cmsg := C.CString(prefix + err.Error())
 	C.ch_set_last_error(cmsg, C.long(chErrorCode(err)))
 	C.free(unsafe.Pointer(cmsg))

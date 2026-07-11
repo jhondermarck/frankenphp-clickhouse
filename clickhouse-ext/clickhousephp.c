@@ -370,3 +370,18 @@ PHP_FUNCTION(clickhouse_close)
     if (result) { RETURN_STR(result); }
     RETURN_EMPTY_STRING();
 }
+
+PHP_FUNCTION(clickhouse_stats)
+{
+    if (zend_parse_parameters_none() == FAILURE) { RETURN_THROWS(); }
+    zend_array *result = clickhouse_stats();
+    if (result == NULL) {
+        zend_long code = (zend_long)clickhouse_get_last_error_code();
+        zend_string *err = clickhouse_get_last_error();
+        const char *msg = err ? ZSTR_VAL(err) : "ClickHouse stats failed";
+        zend_throw_exception(spl_ce_RuntimeException, msg, code);
+        if (err) { zend_string_release(err); }
+        RETURN_THROWS();
+    }
+    RETURN_ARR(result);
+}

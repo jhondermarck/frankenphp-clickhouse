@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -213,6 +214,8 @@ func reapIdleHandles(now time.Time) (reaped int) {
 			reaped++
 		}
 	}
+	atomic.StoreInt64(&statLastReapUnix, now.Unix())
+	atomic.StoreInt64(&statLastReapCount, int64(reaped))
 	return reaped
 }
 
@@ -259,6 +262,7 @@ func dropBatch(id int64) {
 //export clickhouse_batch_begin
 func clickhouse_batch_begin(table *C.zend_string, columns *C.zval, options *C.zval) (ret C.int64_t) {
 	defer idPanicGuard(&ret)
+	atomic.AddInt64(&statBatchesOpened, 1)
 	tableName := frankenphp.GoString(unsafe.Pointer(table))
 
 	colNames, err := parseColumnNames(columns)
@@ -411,6 +415,7 @@ func (cur *cursorState) releaseResources() {
 //export clickhouse_query_cursor
 func clickhouse_query_cursor(query *C.zend_string, params *C.zval, options *C.zval) (ret C.int64_t) {
 	defer idPanicGuard(&ret)
+	atomic.AddInt64(&statCursorsOpened, 1)
 	queryStr := frankenphp.GoString(unsafe.Pointer(query))
 
 	args, err := buildQueryArgs(params)

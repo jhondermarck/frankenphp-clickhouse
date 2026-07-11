@@ -34,6 +34,7 @@ clickhouse_open(string $dsn): int                 // pool nommé additionnel →
 clickhouse_close(int $connection): string
 clickhouse_ping(?int $connection = null): string
 clickhouse_server_version(?int $connection = null): string
+clickhouse_stats(): array                         // snapshot runtime (santé / fuites de handles)
 ```
 
 ### Lecture

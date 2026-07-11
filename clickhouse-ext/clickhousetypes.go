@@ -36,6 +36,7 @@ const (
 	kindJSON
 	kindArray
 	kindMap
+	kindTuple
 )
 
 type colMeta struct {
@@ -43,6 +44,14 @@ type colMeta struct {
 	nullable bool
 	inner    *colMeta // for Array(T): element; for Map(K, V): key
 	value    *colMeta // for Map(K, V): value
+	named    bool     // for Tuple: fields carry names (Tuple(a T, b U))
+	fields   []tupleField
+}
+
+// tupleField is one element of a Tuple(...) — name is empty for unnamed tuples.
+type tupleField struct {
+	name string
+	meta colMeta
 }
 
 // splitTopLevelComma splits "K, V" at the first comma outside any
@@ -65,6 +74,57 @@ func splitTopLevelComma(s string) (string, string, bool) {
 	return "", "", false
 }
 
+// splitTopLevelFields splits a comma-separated list at commas outside any
+// parentheses — used for Tuple field lists, where a field type can itself
+// carry commas (Decimal(18, 4), Enum8('a' = 1, 'b' = 2), nested tuples…).
+func splitTopLevelFields(s string) []string {
+	var out []string
+	depth, start := 0, 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				out = append(out, strings.TrimSpace(s[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	return append(out, strings.TrimSpace(s[start:]))
+}
+
+// splitTupleField separates a Tuple field into its optional name and type.
+// A field is named when a name precedes the type ("ts DateTime64(3)"); the
+// name may be backtick-quoted. Type names never contain a top-level space,
+// so the first depth-0 space marks the name/type boundary.
+func splitTupleField(f string) (name, typ string) {
+	if strings.HasPrefix(f, "`") {
+		if end := strings.IndexByte(f[1:], '`'); end >= 0 {
+			// name = between the backticks; type = the rest after the closing
+			// backtick (TrimSpace drops the separating space). f[1+end] is the
+			// closing backtick, so the type starts at 1+end+1.
+			return f[1 : 1+end], strings.TrimSpace(f[1+end+1:])
+		}
+	}
+	depth := 0
+	for i := 0; i < len(f); i++ {
+		switch f[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ' ':
+			if depth == 0 {
+				return f[:i], strings.TrimSpace(f[i+1:])
+			}
+		}
+	}
+	return "", f
+}
+
 func parseColMeta(dbType string) (colMeta, error) {
 	raw := dbType
 	nullable := false
@@ -82,7 +142,7 @@ strip:
 			break strip
 		}
 	}
-	if strings.HasPrefix(raw, "Array(") {
+	if strings.HasPrefix(raw, "Array(") && strings.HasSuffix(raw, ")") {
 		innerType := raw[len("Array(") : len(raw)-1]
 		inner, err := parseColMeta(innerType)
 		if err != nil {
@@ -104,6 +164,23 @@ strip:
 			return colMeta{}, err
 		}
 		return colMeta{kind: kindMap, inner: &keyMeta, value: &valMeta}, nil
+	}
+	if strings.HasPrefix(raw, "Tuple(") && strings.HasSuffix(raw, ")") {
+		parts := splitTopLevelFields(raw[len("Tuple(") : len(raw)-1])
+		fields := make([]tupleField, 0, len(parts))
+		named := false
+		for i, p := range parts {
+			name, typ := splitTupleField(p)
+			if i == 0 {
+				named = name != ""
+			}
+			fm, err := parseColMeta(typ)
+			if err != nil {
+				return colMeta{}, err
+			}
+			fields = append(fields, tupleField{name: name, meta: fm})
+		}
+		return colMeta{kind: kindTuple, nullable: nullable, named: named, fields: fields}, nil
 	}
 	if strings.HasPrefix(raw, "DateTime64") {
 		return colMeta{kind: kindDateTime64, nullable: nullable}, nil

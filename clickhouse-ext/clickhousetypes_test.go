@@ -106,9 +106,75 @@ func TestParseColMetaArray(t *testing.T) {
 }
 
 func TestParseColMetaUnsupported(t *testing.T) {
-	for _, dbType := range []string{"Tuple(UInt8)", "Nothing", "Map(String)"} {
+	for _, dbType := range []string{"Nothing", "Map(String)", "Tuple(UInt8, Nothing)"} {
 		if _, err := parseColMeta(dbType); err == nil {
 			t.Errorf("parseColMeta(%q) should return an error", dbType)
+		}
+	}
+}
+
+func TestParseColMetaTuple(t *testing.T) {
+	// Unnamed tuple: fields in order, no names.
+	m, err := parseColMeta("Tuple(UInt8, String, Array(Int64))")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.kind != kindTuple || m.named {
+		t.Fatalf("unnamed tuple parsed as {kind:%d named:%v}", m.kind, m.named)
+	}
+	wantKinds := []colKind{kindUInt8, kindString, kindArray}
+	if len(m.fields) != len(wantKinds) {
+		t.Fatalf("got %d fields, want %d", len(m.fields), len(wantKinds))
+	}
+	for i, wk := range wantKinds {
+		if m.fields[i].meta.kind != wk {
+			t.Errorf("field %d kind = %d, want %d", i, m.fields[i].meta.kind, wk)
+		}
+		if m.fields[i].name != "" {
+			t.Errorf("field %d should be unnamed, got %q", i, m.fields[i].name)
+		}
+	}
+	if m.fields[2].meta.inner == nil || m.fields[2].meta.inner.kind != kindInt64 {
+		t.Errorf("Array field inner not parsed: %+v", m.fields[2].meta)
+	}
+
+	// Named tuple, including a field type carrying commas and a nested tuple.
+	m, err = parseColMeta("Tuple(id UInt64, ts DateTime64(3), price Decimal(18, 4), nested Tuple(x UInt8, y String))")
+	if err != nil {
+		t.Fatalf("named tuple error: %v", err)
+	}
+	if m.kind != kindTuple || !m.named {
+		t.Fatalf("named tuple parsed as {kind:%d named:%v}", m.kind, m.named)
+	}
+	wantNames := []string{"id", "ts", "price", "nested"}
+	wantKinds = []colKind{kindUInt64, kindDateTime64, kindDecimal, kindTuple}
+	for i := range wantNames {
+		if m.fields[i].name != wantNames[i] {
+			t.Errorf("field %d name = %q, want %q", i, m.fields[i].name, wantNames[i])
+		}
+		if m.fields[i].meta.kind != wantKinds[i] {
+			t.Errorf("field %d kind = %d, want %d", i, m.fields[i].meta.kind, wantKinds[i])
+		}
+	}
+	if nested := m.fields[3].meta; !nested.named || len(nested.fields) != 2 || nested.fields[1].name != "y" {
+		t.Errorf("nested tuple parsed incorrectly: %+v", nested)
+	}
+}
+
+func TestSplitTupleField(t *testing.T) {
+	cases := []struct{ in, name, typ string }{
+		{"UInt8", "", "UInt8"},
+		{"Nullable(String)", "", "Nullable(String)"},
+		{"Enum8('a' = 1, 'b' = 2)", "", "Enum8('a' = 1, 'b' = 2)"},
+		{"id UInt64", "id", "UInt64"},
+		{"ts DateTime64(3)", "ts", "DateTime64(3)"},
+		{"`my field` UInt8", "my field", "UInt8"},
+		{"e Enum8('x' = 1)", "e", "Enum8('x' = 1)"},
+	}
+	for _, tt := range cases {
+		name, typ := splitTupleField(tt.in)
+		if name != tt.name || typ != tt.typ {
+			t.Errorf("splitTupleField(%q) = (%q, %q), want (%q, %q)", tt.in, name, typ, tt.name, tt.typ)
 		}
 	}
 }
@@ -154,6 +220,47 @@ func TestParseColMetaMap(t *testing.T) {
 	if !m.value.nullable {
 		t.Error("Map(String, Nullable(String)) value should be nullable")
 	}
+}
+
+// walkMeta recurses a parsed colMeta the same way the packer does, so the
+// fuzzer catches any tree shape that parses but can't be safely traversed.
+func walkMeta(m colMeta) {
+	if m.inner != nil {
+		walkMeta(*m.inner)
+	}
+	if m.value != nil {
+		walkMeta(*m.value)
+	}
+	for i := range m.fields {
+		walkMeta(m.fields[i].meta)
+	}
+}
+
+// FuzzParseColMeta feeds arbitrary type strings through the parser. Column
+// type names originate from the server, but the parser does string surgery
+// (prefix stripping, paren-aware splitting, recursion) that must never panic,
+// hang, or blow the stack on a malformed name — it must return a value or an
+// error. Run: go test -run=x -fuzz=FuzzParseColMeta -fuzztime=30s .
+func FuzzParseColMeta(f *testing.F) {
+	seeds := []string{
+		"String", "Nullable(String)", "LowCardinality(Nullable(String))",
+		"Array(Int64)", "Array(Array(Nullable(String)))",
+		"Map(String, UInt64)", "Map(String, Array(Tuple(a UInt8, b String)))",
+		"Tuple(UInt8, String)", "Tuple(id UInt64, ts DateTime64(3), n Tuple(x Int32))",
+		"Decimal(18, 4)", "Enum8('a' = 1, 'b' = 2)", "DateTime64(3, 'UTC')",
+		"JSON", "Int256", "FixedString(16)", "",
+		"Tuple(", "Map(", "Array(", "Tuple(,)", "`weird name` UInt8",
+		"Nullable(", "LowCardinality()", "Map(,)", "Tuple())(",
+	}
+	for _, s := range seeds {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, dbType string) {
+		m, err := parseColMeta(dbType)
+		if err == nil {
+			walkMeta(m)
+		}
+	})
 }
 
 func TestSplitTopLevelComma(t *testing.T) {

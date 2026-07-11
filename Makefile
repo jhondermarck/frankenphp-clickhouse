@@ -1,4 +1,4 @@
-.PHONY: all build ext bench bench_memory bench_worker_docker bench_docker up down restart test test_go frankenphp
+.PHONY: all build ext bench bench_memory bench_worker_docker bench_docker up down restart test test_go test_resilience frankenphp
 
 all: build
 
@@ -73,6 +73,11 @@ bench_worker:
 
 test:
 	./frankenphp-clickhouse php-cli web/test.php
+
+# Disruptive: restarts the ClickHouse container to prove the pool redials.
+# Override the container name with CH_CONTAINER=… if yours differs.
+test_resilience:
+	./frankenphp-clickhouse php-cli web/resilience.php
 
 test_go:
 	CGO_ENABLED=1 \
