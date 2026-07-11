@@ -34,8 +34,9 @@ services:
 
   # ClickHouse Database
   clickhouse:
-    # Pinned: a floating `latest` makes benchmarks and CI non-reproducible.
-    image: clickhouse/clickhouse-server:26.5
+    # Pinned by default (reproducible benchmarks); CI overrides the tag to run
+    # the suite against several ClickHouse versions.
+    image: clickhouse/clickhouse-server:${CLICKHOUSE_IMAGE_TAG:-26.5}
     ports:
       # Host ports are overridable (root .env or shell) to coexist with
       # another local ClickHouse already bound to 8123/9000.

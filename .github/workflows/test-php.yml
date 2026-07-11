@@ -8,10 +8,24 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - { runner: ubuntu-latest, name: amd64 }
+          - { runner: ubuntu-24.04-arm, name: arm64 }
+        # Pinned version for reproducibility + latest to catch regressions early.
+        clickhouse: ["26.5", "latest"]
+    runs-on: ${{ matrix.arch.runner }}
+    name: test (${{ matrix.arch.name }}, ch-${{ matrix.clickhouse }})
+    # The pinned version is a required check; `latest` is a canary that can go
+    # red on upstream ClickHouse changes without blocking.
+    continue-on-error: ${{ matrix.clickhouse == 'latest' }}
+    env:
+      CLICKHOUSE_IMAGE_TAG: ${{ matrix.clickhouse }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install PHP dependencies
         run: |
@@ -19,16 +33,10 @@ jobs:
             -v "${{ github.workspace }}/web:/app" \
             composer:latest install --no-dev --no-interaction
 
-      # --wait relies on the compose healthcheck (clickhouse-client WITH
-      # the password — a bare clickhouse-client always fails auth here).
+      # --wait relies on the compose healthchecks: ClickHouse via
+      # clickhouse-client (with the password), FrankenPHP via /healthz.
       - name: Start services
         run: docker compose up -d --build --wait
-
-      - name: Wait for FrankenPHP (HTTP)
-        run: |
-          timeout 90 bash -c \
-            'until curl -s --max-time 5 -o /dev/null http://localhost:8080/ 2>/dev/null; \
-             do sleep 3; done'
 
       - name: Run PHP tests
         run: docker compose exec -T frankenphp frankenphp php-cli /app/test.php
