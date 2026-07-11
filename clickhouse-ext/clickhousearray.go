@@ -130,7 +130,12 @@ static zend_array* ch_new_array(uint32_t cap) {
     return zend_new_array(cap);
 }
 
-static void ch_add_row(
+// ch_add_rows builds `rows` PHP row arrays in a single CGo crossing and
+// appends them to res. The per-cell scratch is row-major: cell (r, i) lives at
+// index r*n + i. Batching amortizes the ~fixed CGo call cost over many rows —
+// the caller uses rows=1 only when a column packs a nested zend_array* (whose
+// pointer must be consumed in the same call that built it).
+static void ch_add_rows(
     zend_array*      res,
     zend_string**    keys,
     const uint8_t*   types,
@@ -140,38 +145,43 @@ static void ch_add_row(
     const int64_t*   ivals,
     const uint64_t*  uvals,
     const double*    fvals,
-    int              n)
+    int              n,
+    int              rows)
 {
-    zval row;
-    array_init_size(&row, (uint32_t)n);
-    for (int i = 0; i < n; i++) {
-        zval z;
-        switch (types[i]) {
-        case CH_STR:
-            ZVAL_STR(&z, zend_string_init(sbuf + soff[i], slen[i], 0));
-            break;
-        case CH_INT:
-            ZVAL_LONG(&z, (zend_long)ivals[i]);
-            break;
-        case CH_UINT:
-            if (uvals[i] <= (uint64_t)ZEND_LONG_MAX)
-                ZVAL_LONG(&z, (zend_long)uvals[i]);
-            else
-                ZVAL_DOUBLE(&z, (double)uvals[i]);
-            break;
-        case CH_FLOAT:
-            ZVAL_DOUBLE(&z, fvals[i]);
-            break;
-        case CH_ARRAY:
-            ZVAL_ARR(&z, (zend_array*)(uintptr_t)uvals[i]);
-            break;
-        default: // CH_NULL
-            ZVAL_NULL(&z);
-            break;
+    for (int r = 0; r < rows; r++) {
+        const int base = r * n;
+        zval row;
+        array_init_size(&row, (uint32_t)n);
+        for (int i = 0; i < n; i++) {
+            const int k = base + i;
+            zval z;
+            switch (types[k]) {
+            case CH_STR:
+                ZVAL_STR(&z, zend_string_init(sbuf + soff[k], slen[k], 0));
+                break;
+            case CH_INT:
+                ZVAL_LONG(&z, (zend_long)ivals[k]);
+                break;
+            case CH_UINT:
+                if (uvals[k] <= (uint64_t)ZEND_LONG_MAX)
+                    ZVAL_LONG(&z, (zend_long)uvals[k]);
+                else
+                    ZVAL_DOUBLE(&z, (double)uvals[k]);
+                break;
+            case CH_FLOAT:
+                ZVAL_DOUBLE(&z, fvals[k]);
+                break;
+            case CH_ARRAY:
+                ZVAL_ARR(&z, (zend_array*)(uintptr_t)uvals[k]);
+                break;
+            default: // CH_NULL
+                ZVAL_NULL(&z);
+                break;
+            }
+            zend_hash_add_new(Z_ARRVAL(row), keys[i], &z);
         }
-        zend_hash_add_new(Z_ARRVAL(row), keys[i], &z);
+        zend_hash_next_index_insert(res, &row);
     }
-    zend_hash_next_index_insert(res, &row);
 }
 */
 import "C"
@@ -223,16 +233,16 @@ func freeResultArray(arr unsafe.Pointer) {
 
 var _emptySbuf = [1]byte{0}
 
-func addGenericRow(arr unsafe.Pointer, keys []*C.zend_string,
+func addGenericRows(arr unsafe.Pointer, keys []*C.zend_string,
 	types []C.uint8_t, sbuf []byte,
 	soff []C.uint32_t, slen []C.uint32_t,
-	ivals []C.int64_t, uvals []C.uint64_t, fvals []C.double, n int,
+	ivals []C.int64_t, uvals []C.uint64_t, fvals []C.double, n, rows int,
 ) {
 	sp := (*C.char)(unsafe.Pointer(&_emptySbuf[0]))
 	if len(sbuf) > 0 {
 		sp = (*C.char)(unsafe.Pointer(unsafe.SliceData(sbuf)))
 	}
-	C.ch_add_row(
+	C.ch_add_rows(
 		(*C.zend_array)(arr),
 		unsafe.SliceData(keys),
 		unsafe.SliceData(types),
@@ -243,6 +253,7 @@ func addGenericRow(arr unsafe.Pointer, keys []*C.zend_string,
 		unsafe.SliceData(uvals),
 		unsafe.SliceData(fvals),
 		C.int(n),
+		C.int(rows),
 	)
 }
 

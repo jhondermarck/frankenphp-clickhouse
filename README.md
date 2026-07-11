@@ -36,7 +36,7 @@ clickhouse_query_array($q)
          ──────────────────────────►  rows.Query(ctx, q)
                                            ◄─────────── TCP blocks (LZ4)
                       rows.Scan() → packCol()
-                      addGenericRow() [1 CGo/row]
+                      ch_add_rows() [1 CGo / N rows]
          ◄──────────────────────────  zend_array*
 $rows = [['id'=>..., 'start'=>...], ...]
 ```
@@ -48,7 +48,7 @@ $rows = [['id'=>..., 'start'=>...], ...]
 | Transport | Native ClickHouse binary protocol (port 9000) + LZ4 |
 | Scan | `rows.Scan()` into typed destinations allocated once |
 | Serialization | `packCol()` — cumulative byte buffer, zero allocation in the hot loop |
-| PHP array | `ch_add_row()` — direct C construction, no intermediate serialization |
+| PHP array | `ch_add_rows()` — direct C construction; scalar results build many rows per CGo crossing (composite results fall back to one row per call) |
 | DateTime | `appendClickHouseDateTime()` / `appendClickHouseDateTime64()` — ClickHouse-native formatting without `time.Format` or allocation |
 
 ## Benchmarks
@@ -63,9 +63,9 @@ Parameters: 3 warmup + 20 iterations, 100k rows.
 ```
   Method                          avg      min      p95      rows    vs SMI2
   ──────────────────────────────────────────────────────────────────────────
-  SMI2 – HTTP + php-array        0.324s   0.285s   0.397s   100,000   ref
-  Go TCP + query_array            0.038s   0.036s   0.040s   100,000  ×8.57
-  Go TCP + cursor (10k chunks)    0.040s   0.039s   0.043s   100,000  ×8.08
+  SMI2 – HTTP + php-array        0.324s   0.296s   0.364s   100,000   ref
+  Go TCP + query_array            0.034s   0.034s   0.035s   100,000  ×9.42
+  Go TCP + cursor (10k chunks)    0.034s   0.032s   0.038s   100,000  ×9.50
 ```
 
 ### INSERT (100k rows batch)

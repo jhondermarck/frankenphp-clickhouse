@@ -26,9 +26,15 @@ type rowPacker struct {
 	cols  []string
 	metas []colMeta
 	dests []interface{}
-	// Per-column scratch, allocated once and reused across every packRows
-	// call on this stream (pure Go memory — safe to keep across requests,
-	// unlike the request-scoped zend_string keys).
+	// batchRows is how many scanned rows are accumulated before one ch_add_rows
+	// CGo crossing. Scalar-only results batch many rows (amortizing the call
+	// cost); results with a composite column stay at 1 so each nested
+	// zend_array* pointer is consumed in the call that built it (and a
+	// mid-stream error can't strand un-inserted arrays).
+	batchRows int
+	// Per-column scratch, sized batchRows*len(cols) (row-major), allocated once
+	// and reused across every packRows call on this stream (pure Go memory —
+	// safe to keep across requests, unlike the request-scoped zend_string keys).
 	types []C.uint8_t
 	soff  []C.uint32_t
 	slen  []C.uint32_t
@@ -36,6 +42,16 @@ type rowPacker struct {
 	uvals []C.uint64_t
 	fvals []C.double
 	sbuf  []byte
+}
+
+// isCompositeKind reports whether a column packs into a nested zend_array*
+// during packCol (so its batch must flush one row at a time).
+func isCompositeKind(k colKind) bool {
+	switch k {
+	case kindArray, kindMap, kindTuple, kindGeo, kindJSON:
+		return true
+	}
+	return false
 }
 
 // newRowPacker parses column metadata for a result stream. A nil packer
@@ -62,17 +78,41 @@ func newRowPacker(rows driver.Rows) (*rowPacker, error) {
 			dests[i] = reflect.New(ct.ScanType()).Interface()
 		}
 	}
+
+	// A composite column forces row-at-a-time flushing; otherwise batch many
+	// rows per CGo crossing, capped by a scratch-cell budget so wide results
+	// don't over-allocate (batchRows*n cells ≈ constant regardless of n).
+	batchRows := 1
+	composite := false
+	for _, m := range metas {
+		if isCompositeKind(m.kind) {
+			composite = true
+			break
+		}
+	}
+	if !composite {
+		const cellBudget = 8192
+		batchRows = cellBudget / n
+		if batchRows < 1 {
+			batchRows = 1
+		} else if batchRows > 512 {
+			batchRows = 512
+		}
+	}
+
+	cells := batchRows * n
 	return &rowPacker{
-		cols:  cols,
-		metas: metas,
-		dests: dests,
-		types: make([]C.uint8_t, n),
-		soff:  make([]C.uint32_t, n),
-		slen:  make([]C.uint32_t, n),
-		ivals: make([]C.int64_t, n),
-		uvals: make([]C.uint64_t, n),
-		fvals: make([]C.double, n),
-		sbuf:  make([]byte, 0, n*64),
+		cols:      cols,
+		metas:     metas,
+		dests:     dests,
+		batchRows: batchRows,
+		types:     make([]C.uint8_t, cells),
+		soff:      make([]C.uint32_t, cells),
+		slen:      make([]C.uint32_t, cells),
+		ivals:     make([]C.int64_t, cells),
+		uvals:     make([]C.uint64_t, cells),
+		fvals:     make([]C.double, cells),
+		sbuf:      make([]byte, 0, cells*64),
 	}, nil
 }
 
@@ -113,6 +153,20 @@ func (p *rowPacker) packRows(rows driver.Rows, max int64) (unsafe.Pointer, bool,
 		result = newResultArray(0)
 	}
 
+	// filled = rows packed into the scratch but not yet handed to PHP.
+	// flush emits them in one CGo crossing and resets the scratch. Scalar-only
+	// scratch holds no C allocations, so an error path can free the result
+	// without flushing (any un-flushed rows vanish with the Go slices);
+	// composite results run at batchRows=1, so filled is always 0 across a scan.
+	filled := 0
+	flush := func() {
+		if filled > 0 {
+			addGenericRows(result, keys, types, p.sbuf, soff, slen, ivals, uvals, fvals, n, filled)
+			filled = 0
+			p.sbuf = p.sbuf[:0]
+		}
+	}
+
 	var count int64
 	done := false
 	for {
@@ -133,13 +187,17 @@ func (p *rowPacker) packRows(rows driver.Rows, max int64) (unsafe.Pointer, bool,
 			freeResultArray(result)
 			return nil, false, fmt.Errorf("scan failed: %w", err)
 		}
-		p.sbuf = p.sbuf[:0]
+		base := filled * n
 		for i, m := range p.metas {
-			packCol(i, m, p.dests[i], types, soff, slen, ivals, uvals, fvals, &p.sbuf)
+			packCol(base+i, m, p.dests[i], types, soff, slen, ivals, uvals, fvals, &p.sbuf)
 		}
-		addGenericRow(result, keys, types, p.sbuf, soff, slen, ivals, uvals, fvals, n)
+		filled++
 		count++
+		if filled == p.batchRows {
+			flush()
+		}
 	}
+	flush()
 	// A mid-stream failure (network cut, server error) ends the Next() loop
 	// without error on Scan — surface it instead of returning truncated rows.
 	if done {

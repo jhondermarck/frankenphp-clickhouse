@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Faster reads**: scalar-only result rows are now built in batches per CGo
+  crossing (`ch_add_rows`) instead of one call per row, cutting Go↔C transition
+  overhead. Measured ~13% faster `query_array` and ~21% faster cursor on a
+  100k-row SELECT (×8.4→×9.4 and ×7.6→×9.5 vs smi2). Results with a composite
+  column (Array/Map/Tuple/Geo/JSON) are unchanged (one row per call).
+
 ### Added
 
 - **Geo types** (read): `Point` → `[x, y]`, and `Ring`, `LineString`,
