@@ -410,10 +410,21 @@ if ($s['handles']['cursors_open'] > 100) {
 }
 ```
 
+To expose this on a Prometheus `/metrics` endpoint, the optional OO package
+formats the snapshot as OpenMetrics text (gauges for state/pool/handles,
+counters for the lifetime totals, a version-labelled `build_info`):
+
+```php
+header('Content-Type: text/plain; version=0.0.4');
+echo \Jhondermarck\ClickHouse\ClickHouse::formatMetrics(clickhouse_stats());
+```
+
+See [`examples/metrics_endpoint.php`](examples/metrics_endpoint.php).
+
 ## Testing
 
 ```bash
-make test             # PHP integration tests (337 assertions)
+make test             # PHP integration tests (360 assertions)
 make test_go          # Go unit tests (incl. a race-tested concurrency stress test)
 make test_resilience  # Restart ClickHouse, verify the pool transparently redials
 ```
@@ -431,6 +442,7 @@ The test suite covers:
 - **Options**: per-call settings / query_id / timeout, multiple connections, ClickHouse error codes via `getCode()`
 - **Exceptions**: RuntimeException on bad query, bad DSN, not connected, closed handles
 - **Observability**: `clickhouse_stats` shape, counter deltas, open-handle gauge
+- **OO wrapper**: facade query/cursor/batch, `rows()` generator, Prometheus `formatMetrics`
 - **Memory leaks**: repeated query/insert/exec with no growth
 
 ## Install
@@ -450,6 +462,21 @@ package (IDE-only, not loaded at runtime):
 
 ```bash
 composer require --dev jhondermarck/frankenphp-clickhouse-stubs
+```
+
+Prefer objects to global functions? An optional OO facade wraps the procedural
+API (with cursor/batch handle objects, a lazy `rows()` generator, and a
+Prometheus exporter):
+
+```bash
+composer require jhondermarck/frankenphp-clickhouse-oo
+```
+
+```php
+use Jhondermarck\ClickHouse\ClickHouse;
+
+$ch = new ClickHouse($dsn);
+foreach ($ch->cursor('SELECT * FROM events')->rows() as $row) { /* … */ }
 ```
 
 ## Build
@@ -514,7 +541,9 @@ web/
   worker.php              # FrankenPHP worker (persistent connection + retry)
 examples/
   etl_export.php          # Streaming cursor → batch table copy (bounded memory)
+  metrics_endpoint.php    # clickhouse_stats() → Prometheus /metrics exposition
 stubs/                    # Composer IDE stubs package (clickhouse_* signatures)
+packages/oo/              # Optional OO wrapper package (facade + Prometheus exporter)
 docker/                   # Docker config: dev stack + docker/release/ (distributable image)
 sample/                   # Standalone production Dockerfile
 docs/                     # Migration guide (smi2 → native)

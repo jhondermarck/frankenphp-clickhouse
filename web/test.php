@@ -1622,6 +1622,39 @@ $stClosed = clickhouse_stats();
 eq($stClosed['handles']['cursors_open'], 0, 'cursors_open = 0 after close');
 
 // =============================================================================
+// OO wrapper package (packages/oo) — thin facade over the native functions
+// =============================================================================
+
+suite('OO wrapper');
+
+require __DIR__ . '/../packages/oo/src/Cursor.php';
+require __DIR__ . '/../packages/oo/src/Batch.php';
+require __DIR__ . '/../packages/oo/src/ClickHouse.php';
+
+$ch = new \Jhondermarck\ClickHouse\ClickHouse(); // default connection already open
+eq($ch->query('SELECT 7 AS n')[0]['n'], 7, 'OO query()');
+
+$ch->exec("DROP TABLE IF EXISTS clickhousephp_oo_test");
+$ch->exec("CREATE TABLE clickhousephp_oo_test (id UInt32) ENGINE = Memory");
+$oob = $ch->batch('clickhousephp_oo_test', ['id']);
+$oob->append([[1], [2], [3]]);
+eq($oob->send(), 'Ok', 'OO batch send()');
+
+$collected = [];
+$oocur = $ch->cursor("SELECT id FROM clickhousephp_oo_test ORDER BY id");
+foreach ($oocur->rows(2) as $row) {   // 2-row chunks over 3 rows
+    $collected[] = $row['id'];
+}
+$oocur->close();
+eq($collected, [1, 2, 3], 'OO cursor rows() generator streams all rows');
+
+$metrics = \Jhondermarck\ClickHouse\ClickHouse::formatMetrics($ch->stats());
+ok(str_contains($metrics, 'clickhouse_queries_total'), 'formatMetrics emits a counter');
+ok(str_contains($metrics, 'clickhouse_build_info{server_version='), 'formatMetrics emits build_info');
+
+$ch->exec("DROP TABLE IF EXISTS clickhousephp_oo_test");
+
+// =============================================================================
 // Cleanup
 // =============================================================================
 

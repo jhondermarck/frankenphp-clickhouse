@@ -1,0 +1,19 @@
+{
+    "name": "jhondermarck/frankenphp-clickhouse-oo",
+    "description": "Optional object-oriented wrapper around the frankenphp-clickhouse native functions.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["clickhouse", "frankenphp"],
+    "homepage": "https://github.com/jhondermarck/frankenphp-clickhouse",
+    "authors": [
+        { "name": "Jérôme Hondermarck" }
+    ],
+    "require": {
+        "php": ">=8.2"
+    },
+    "autoload": {
+        "psr-4": {
+            "Jhondermarck\\ClickHouse\\": "src/"
+        }
+    }
+}

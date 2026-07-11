@@ -41,6 +41,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fully documented signatures for editor autocompletion and static analysis.
 - **ETL example** (`examples/etl_export.php`) — a bounded-memory streaming
   cursor → batch table copy.
+- **Optional OO wrapper** (`packages/oo`, `jhondermarck/frankenphp-clickhouse-oo`):
+  a `ClickHouse` facade over the procedural API with `Cursor`/`Batch` handle
+  objects, a lazy `Cursor::rows()` generator, and a Prometheus/OpenMetrics
+  exporter (`ClickHouse::formatMetrics()`), demoed by
+  `examples/metrics_endpoint.php`.
 - **Fuzz target** `FuzzParseColMeta` for the column-type parser, and
   `make test_resilience` verifying the connection pool redials transparently
   after a ClickHouse restart.
