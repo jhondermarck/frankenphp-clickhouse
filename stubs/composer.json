@@ -1,0 +1,16 @@
+{
+    "name": "jhondermarck/frankenphp-clickhouse-stubs",
+    "description": "IDE stubs for the frankenphp-clickhouse native extension (clickhouse_* functions).",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["clickhouse", "frankenphp", "stubs", "ide", "static-analysis"],
+    "homepage": "https://github.com/jhondermarck/frankenphp-clickhouse",
+    "authors": [
+        { "name": "Jérôme Hondermarck" }
+    ],
+    "require": {
+        "php": ">=8.2"
+    },
+    "//": "Intentionally no autoload: the real functions come from the compiled extension. IDEs and static analysers index vendor/ regardless, so requiring the file at runtime would fatal on redeclaration.",
+    "autoload": {}
+}
