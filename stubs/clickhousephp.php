@@ -63,6 +63,20 @@ function clickhouse_close(int $connection): string {}
 function clickhouse_query_array(string $query, ?array $params = null, ?array $options = null): array {}
 
 /**
+ * Run a SELECT and return the result columnar — one array per column
+ * (`['id' => […], 'price' => […]]`) instead of one per row. Same data as
+ * {@see clickhouse_query_array()}, transposed; faster and much lighter on
+ * wide/large results.
+ *
+ * @param string $query SQL with optional {name:Type} placeholders
+ * @param array<string,mixed>|list<mixed>|null $params named or positional bindings
+ * @param array{connection?:int,settings?:array<string,mixed>,query_id?:string,timeout?:string}|null $options
+ * @return array<string,list<mixed>> columns keyed by name, each a list of values in row order
+ * @throws \RuntimeException on query error or an unsupported column type
+ */
+function clickhouse_query_columns(string $query, ?array $params = null, ?array $options = null): array {}
+
+/**
  * Open a streaming cursor for a SELECT — bounded memory, fetched in chunks.
  * Always release it with {@see clickhouse_cursor_close()}.
  *

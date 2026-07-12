@@ -27,6 +27,12 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_query_array, 0, 1, IS
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, options, IS_ARRAY, 1, "null")
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_query_columns, 0, 1, IS_ARRAY, 0)
+	ZEND_ARG_TYPE_INFO(0, query, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, params, IS_ARRAY, 1, "null")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, options, IS_ARRAY, 1, "null")
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_clickhouse_query_cursor, 0, 1, IS_LONG, 0)
 	ZEND_ARG_TYPE_INFO(0, query, IS_STRING, 0)
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, params, IS_ARRAY, 1, "null")
@@ -96,6 +102,7 @@ ZEND_FUNCTION(clickhouse_disconnect);
 ZEND_FUNCTION(clickhouse_insert);
 ZEND_FUNCTION(clickhouse_exec);
 ZEND_FUNCTION(clickhouse_query_array);
+ZEND_FUNCTION(clickhouse_query_columns);
 ZEND_FUNCTION(clickhouse_query_cursor);
 ZEND_FUNCTION(clickhouse_cursor_fetch);
 ZEND_FUNCTION(clickhouse_cursor_close);
@@ -117,6 +124,7 @@ static const zend_function_entry ext_functions[] = {
 	ZEND_FE(clickhouse_insert, arginfo_clickhouse_insert)
 	ZEND_FE(clickhouse_exec, arginfo_clickhouse_exec)
 	ZEND_FE(clickhouse_query_array, arginfo_clickhouse_query_array)
+	ZEND_FE(clickhouse_query_columns, arginfo_clickhouse_query_columns)
 	ZEND_FE(clickhouse_query_cursor, arginfo_clickhouse_query_cursor)
 	ZEND_FE(clickhouse_cursor_fetch, arginfo_clickhouse_cursor_fetch)
 	ZEND_FE(clickhouse_cursor_close, arginfo_clickhouse_cursor_close)

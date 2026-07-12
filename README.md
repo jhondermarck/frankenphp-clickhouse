@@ -99,6 +99,7 @@ clickhouse_connect(string $dsn): string
 clickhouse_open(string $dsn): int                 // extra named connection
 clickhouse_close(int $connection): string
 clickhouse_query_array(string $query, ?array $params = null, ?array $options = null): array
+clickhouse_query_columns(string $query, ?array $params = null, ?array $options = null): array
 clickhouse_query_cursor(string $query, ?array $params = null, ?array $options = null): int
 clickhouse_cursor_fetch(int $cursor, int $max_rows = 10000): array
 clickhouse_cursor_close(int $cursor): string
@@ -275,6 +276,23 @@ clickhouse_insert('staging', [
 clickhouse_disconnect();
 ```
 
+### Columnar results
+
+`clickhouse_query_columns()` returns the same data as `clickhouse_query_array()`
+but **transposed** — one array per column instead of one per row:
+
+```php
+$cols = clickhouse_query_columns('SELECT id, price FROM events');
+// ['id' => [1, 2, 3, …], 'price' => [1.5, 2.5, 3.0, …]]
+$cols['price'][2];   // == query_array()[2]['price']
+```
+
+Because it allocates one PHP array per column instead of one per row, it is
+faster and **much lighter** on wide/large results — a 500k-row × 5-column
+result held **~56 MB vs ~204 MB** for `query_array` (~3.6× less). Use it for
+analytics, column-wise processing, or exporting to a dataframe; use
+`query_array` when you iterate row by row.
+
 ## Supported ClickHouse Types
 
 | ClickHouse Type | PHP Type | Notes |
@@ -426,7 +444,7 @@ See [`examples/metrics_endpoint.php`](examples/metrics_endpoint.php).
 ## Testing
 
 ```bash
-make test             # PHP integration tests (369 assertions)
+make test             # PHP integration tests (382 assertions)
 make test_go          # Go unit tests (incl. a race-tested concurrency stress test)
 make test_resilience  # Restart ClickHouse, verify the pool transparently redials
 ```
@@ -438,7 +456,7 @@ go test -C clickhouse-ext -run=xxx -fuzz=FuzzParseColMeta -fuzztime=30s .
 ```
 
 The test suite covers:
-- **SELECT / cursor**: query_array and streaming cursors return correct PHP arrays for every supported type
+- **SELECT / cursor**: query_array, columnar query_columns, and streaming cursors return correct PHP arrays for every supported type
 - **INSERT / batch / async**: all write paths with value verification, including Map/Array/Tuple (and nullable) columns
 - **Types**: numeric, String/FixedString/Enum, Date*/DateTime*, UUID, IPv4/6, Decimal, Bool, Nullable, LowCardinality, Array, Map, Tuple (named/unnamed/nested, incl. `Array(Tuple)` and `Map(_, Tuple)`), Geo (Point/Ring/LineString/Polygon/Multi*), Variant/Dynamic, Int128/256, JSON
 - **Options**: per-call settings / query_id / timeout, multiple connections, ClickHouse error codes via `getCode()`

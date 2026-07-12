@@ -209,6 +209,68 @@ func (p *rowPacker) packRows(rows driver.Rows, max int64) (unsafe.Pointer, bool,
 	return result, done, nil
 }
 
+// packColumns drains the whole stream into a columnar result: an associative
+// array { colName: [v0, v1, …] }. It reuses the same scan + packCol scratch as
+// packRows but appends each cell to its column's array (via ch_add_columns),
+// so a wide/large result allocates one PHP array per column instead of one per
+// row — far fewer allocations and lower memory.
+func (p *rowPacker) packColumns(rows driver.Rows) (unsafe.Pointer, error) {
+	n := len(p.cols)
+	cols := make([]*C.zend_array, n)
+	for i := range cols {
+		cols[i] = (*C.zend_array)(newResultArray(0))
+	}
+	freeCols := func() {
+		for _, c := range cols {
+			freeResultArray(unsafe.Pointer(c))
+		}
+	}
+
+	types, soff, slen := p.types, p.soff, p.slen
+	ivals, uvals, fvals := p.ivals, p.uvals, p.fvals
+
+	filled := 0
+	flush := func() {
+		if filled > 0 {
+			addGenericColumns(cols, types, p.sbuf, soff, slen, ivals, uvals, fvals, n, filled)
+			filled = 0
+			p.sbuf = p.sbuf[:0]
+		}
+	}
+
+	for rows.Next() {
+		for i, m := range p.metas {
+			if m.nullable {
+				resetNullableDest(m.kind, p.dests[i])
+			}
+		}
+		if err := rows.Scan(p.dests...); err != nil {
+			freeCols()
+			return nil, fmt.Errorf("scan failed: %w", err)
+		}
+		base := filled * n
+		for i, m := range p.metas {
+			packCol(base+i, m, p.dests[i], types, soff, slen, ivals, uvals, fvals, &p.sbuf)
+		}
+		filled++
+		if filled == p.batchRows {
+			flush()
+		}
+	}
+	flush()
+	if err := rows.Err(); err != nil {
+		freeCols()
+		return nil, fmt.Errorf("query interrupted: %w", err)
+	}
+
+	// Assemble { colName: column-array }. Keys added once here, not per row.
+	result := newResultArray(uint32(n))
+	for i, name := range p.cols {
+		kvAddArr((*C.zend_array)(result), phpKey{s: name}, cols[i])
+	}
+	return result, nil
+}
+
 // ── Idle-handle reaper ────────────────────────────────────────────────────────
 
 // A PHP script that dies without closing a cursor or batch pins a

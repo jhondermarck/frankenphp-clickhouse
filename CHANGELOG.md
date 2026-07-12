@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`clickhouse_query_columns(): array`** — a columnar result mode returning
+  one array per column (`['id' => […], 'price' => […]]`) instead of one per
+  row. Same data as `query_array`, transposed. Allocating one PHP array per
+  column rather than per row makes it faster and much lighter on wide/large
+  results (a 500k×5 result held ~56 MB vs ~204 MB, ~3.6× less). Built via
+  `ch_add_columns`, the transpose of the batched row builder.
 - **`Variant(…)` and `Dynamic` types** (read): each row resolves to the
   concrete value of whichever type it holds — a PHP scalar, `null`, or a nested
   array for composite values. Also usable nested (`Array(Variant)`,

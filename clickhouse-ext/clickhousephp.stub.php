@@ -16,6 +16,8 @@ function clickhouse_exec(string $query, ?array $params = null, ?array $options =
 
 function clickhouse_query_array(string $query, ?array $params = null, ?array $options = null): array {}
 
+function clickhouse_query_columns(string $query, ?array $params = null, ?array $options = null): array {}
+
 function clickhouse_query_cursor(string $query, ?array $params = null, ?array $options = null): int {}
 
 function clickhouse_cursor_fetch(int $cursor, int $max_rows = 10000): array {}

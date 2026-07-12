@@ -165,6 +165,29 @@ PHP_FUNCTION(clickhouse_query_array)
     RETURN_ARR(result);
 }
 
+PHP_FUNCTION(clickhouse_query_columns)
+{
+    zend_string *query = NULL;
+    zval *params = NULL;
+    zval *options = NULL;
+    ZEND_PARSE_PARAMETERS_START(1, 3)
+        Z_PARAM_STR(query)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ARRAY_OR_NULL(params)
+        Z_PARAM_ARRAY_OR_NULL(options)
+    ZEND_PARSE_PARAMETERS_END();
+    zend_array *result = clickhouse_query_columns(query, params, options);
+    if (result == NULL) {
+        zend_long code = (zend_long)clickhouse_get_last_error_code();
+        zend_string *err = clickhouse_get_last_error();
+        const char *msg = err ? ZSTR_VAL(err) : "ClickHouse query failed";
+        zend_throw_exception(spl_ce_RuntimeException, msg, code);
+        if (err) { zend_string_release(err); }
+        RETURN_THROWS();
+    }
+    RETURN_ARR(result);
+}
+
 PHP_FUNCTION(clickhouse_query_cursor)
 {
     zend_string *query = NULL;

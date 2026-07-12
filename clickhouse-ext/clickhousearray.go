@@ -183,6 +183,54 @@ static void ch_add_rows(
         zend_hash_next_index_insert(res, &row);
     }
 }
+
+// ch_add_columns is the columnar transpose of ch_add_rows: instead of one row
+// array per row, it appends each cell to its column's array (cols[i]). Same
+// row-major scratch (cell (r,i) at r*n+i), one CGo crossing per batch.
+static void ch_add_columns(
+    zend_array**     cols,
+    const uint8_t*   types,
+    const char*      sbuf,
+    const uint32_t*  soff,
+    const uint32_t*  slen,
+    const int64_t*   ivals,
+    const uint64_t*  uvals,
+    const double*    fvals,
+    int              n,
+    int              rows)
+{
+    for (int r = 0; r < rows; r++) {
+        const int base = r * n;
+        for (int i = 0; i < n; i++) {
+            const int k = base + i;
+            zval z;
+            switch (types[k]) {
+            case CH_STR:
+                ZVAL_STR(&z, zend_string_init(sbuf + soff[k], slen[k], 0));
+                break;
+            case CH_INT:
+                ZVAL_LONG(&z, (zend_long)ivals[k]);
+                break;
+            case CH_UINT:
+                if (uvals[k] <= (uint64_t)ZEND_LONG_MAX)
+                    ZVAL_LONG(&z, (zend_long)uvals[k]);
+                else
+                    ZVAL_DOUBLE(&z, (double)uvals[k]);
+                break;
+            case CH_FLOAT:
+                ZVAL_DOUBLE(&z, fvals[k]);
+                break;
+            case CH_ARRAY:
+                ZVAL_ARR(&z, (zend_array*)(uintptr_t)uvals[k]);
+                break;
+            default: // CH_NULL
+                ZVAL_NULL(&z);
+                break;
+            }
+            zend_hash_next_index_insert(cols[i], &z);
+        }
+    }
+}
 */
 import "C"
 import (
@@ -245,6 +293,31 @@ func addGenericRows(arr unsafe.Pointer, keys []*C.zend_string,
 	C.ch_add_rows(
 		(*C.zend_array)(arr),
 		unsafe.SliceData(keys),
+		unsafe.SliceData(types),
+		sp,
+		unsafe.SliceData(soff),
+		unsafe.SliceData(slen),
+		unsafe.SliceData(ivals),
+		unsafe.SliceData(uvals),
+		unsafe.SliceData(fvals),
+		C.int(n),
+		C.int(rows),
+	)
+}
+
+// addGenericColumns appends `rows` rows of row-major scratch into the per-column
+// arrays (cols[i] gets column i's values), in one CGo crossing.
+func addGenericColumns(cols []*C.zend_array,
+	types []C.uint8_t, sbuf []byte,
+	soff []C.uint32_t, slen []C.uint32_t,
+	ivals []C.int64_t, uvals []C.uint64_t, fvals []C.double, n, rows int,
+) {
+	sp := (*C.char)(unsafe.Pointer(&_emptySbuf[0]))
+	if len(sbuf) > 0 {
+		sp = (*C.char)(unsafe.Pointer(unsafe.SliceData(sbuf)))
+	}
+	C.ch_add_columns(
+		unsafe.SliceData(cols),
 		unsafe.SliceData(types),
 		sp,
 		unsafe.SliceData(soff),

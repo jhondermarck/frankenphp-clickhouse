@@ -28,6 +28,17 @@ final class ClickHouse
         return clickhouse_query_array($sql, $params, $options);
     }
 
+    /**
+     * Columnar result — one array per column instead of one per row. Lighter
+     * and faster on wide/large results.
+     *
+     * @return array<string,list<mixed>>
+     */
+    public function columns(string $sql, ?array $params = null, ?array $options = null): array
+    {
+        return clickhouse_query_columns($sql, $params, $options);
+    }
+
     public function cursor(string $sql, ?array $params = null, ?array $options = null): Cursor
     {
         return new Cursor(clickhouse_query_cursor($sql, $params, $options));

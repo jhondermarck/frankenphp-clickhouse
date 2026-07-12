@@ -461,6 +461,49 @@ func clickhouse_query_array(query *C.zend_string, params *C.zval, options *C.zva
 	return result
 }
 
+//export clickhouse_query_columns
+func clickhouse_query_columns(query *C.zend_string, params *C.zval, options *C.zval) (ret unsafe.Pointer) {
+	defer nullPanicGuard(&ret)
+	atomic.AddInt64(&statQueries, 1)
+	client, ctx, cancel, err := callSetup(options, true)
+	if err != nil {
+		setLastError(err.Error())
+		return nil
+	}
+	defer cancel()
+	queryStr := frankenphp.GoString(unsafe.Pointer(query))
+
+	args, err := buildQueryArgs(params)
+	if err != nil {
+		setLastError(err.Error())
+		return nil
+	}
+
+	rows, qerr := client.Query(ctx, queryStr, args...)
+	if qerr != nil {
+		setChError("", qerr)
+		return nil
+	}
+	defer func() {
+		rows.Close()
+	}()
+
+	packer, err := newRowPacker(rows)
+	if err != nil {
+		setLastError(err.Error())
+		return nil
+	}
+	if packer == nil { // zero-column result
+		return newResultArray(0)
+	}
+	result, err := packer.packColumns(rows)
+	if err != nil {
+		setChError("", err)
+		return nil
+	}
+	return result
+}
+
 //export clickhouse_async_insert
 func clickhouse_async_insert(query *C.zend_string, wait C.int, params *C.zval, options *C.zval) (ret unsafe.Pointer) {
 	defer phpPanicGuard(&ret)

@@ -111,6 +111,43 @@ ok(is_string($result[0]['start']), 'start is string');
 ok(is_string($result[0]['end']),   'end is string');
 
 // =============================================================================
+// clickhouse_query_columns — columnar result mode
+// =============================================================================
+
+suite('clickhouse_query_columns');
+
+$cols = clickhouse_query_columns("SELECT * FROM clickhousephp_events_test ORDER BY id");
+ok(is_array($cols), 'returns a PHP array');
+eq(array_keys($cols), ['id', 'start', 'end', 'machine_id', 'event_type_id'], 'keyed by column name');
+ok(is_array($cols['id']) && count($cols['id']) === 3, 'each column is an array of 3 values');
+eq($cols['id'], ['evt-1', 'evt-2', 'evt-3'], 'id column values in row order');
+eq($cols['machine_id'], ['machine-A', 'machine-B', 'machine-A'], 'machine_id column values');
+eq($cols['start'][0], '2024-01-01 08:00:00', 'DateTime formatted in columnar mode');
+
+// Columnar is a transpose of query_array — same data, different shape.
+$rowsView = clickhouse_query_array("SELECT * FROM clickhousephp_events_test ORDER BY id");
+eq($cols['event_type_id'][2], $rowsView[2]['event_type_id'], 'columns[col][i] == rows[i][col]');
+
+// Typed values, arrays and nulls survive the columnar path.
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_qc_test");
+clickhouse_exec("CREATE TABLE clickhousephp_qc_test (
+    n UInt32, tags Array(String), score Nullable(Float64)
+) ENGINE = Memory");
+clickhouse_exec("INSERT INTO clickhousephp_qc_test VALUES
+    (10, ['x', 'y'], 1.5), (20, [], NULL)");
+$qc = clickhouse_query_columns("SELECT * FROM clickhousephp_qc_test ORDER BY n");
+eq($qc['n'], [10, 20], 'UInt32 column');
+ok(is_int($qc['n'][0]), 'column values keep their PHP type (int)');
+eq($qc['tags'], [['x', 'y'], []], 'Array(String) column of nested arrays');
+eq($qc['score'][0], 1.5, 'Nullable float value');
+ok($qc['score'][1] === null, 'Nullable NULL in columnar mode');
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_qc_test");
+
+// Empty result → empty columns (still keyed).
+$empty = clickhouse_query_columns("SELECT * FROM clickhousephp_events_test WHERE id = 'nope'");
+eq(count($empty['id']), 0, 'empty result → empty column arrays');
+
+// =============================================================================
 // clickhouse_insert — batch INSERT via flat array
 // =============================================================================
 
@@ -1686,6 +1723,7 @@ if ($ooDir === null) {
 
     $ch = new \Jhondermarck\ClickHouse\ClickHouse(); // default connection already open
     eq($ch->query('SELECT 7 AS n')[0]['n'], 7, 'OO query()');
+    eq($ch->columns('SELECT 7 AS n')['n'], [7], 'OO columns()');
 
     $ch->exec("DROP TABLE IF EXISTS clickhousephp_oo_test");
     $ch->exec("CREATE TABLE clickhousephp_oo_test (id UInt32) ENGINE = Memory");
