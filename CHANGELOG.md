@@ -6,13 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
-
-- **Faster reads**: scalar-only result rows are now built in batches per CGo
-  crossing (`ch_add_rows`) instead of one call per row, cutting Go↔C transition
-  overhead. Measured ~13% faster `query_array` and ~21% faster cursor on a
-  100k-row SELECT (×8.4→×9.4 and ×7.6→×9.5 vs smi2). Results with a composite
-  column (Array/Map/Tuple/Geo/JSON) are unchanged (one row per call).
+## [0.3.0] - 2026-07-12
 
 ### Added
 
@@ -20,6 +14,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Polygon`, `MultiPolygon`, `MultiLineString` as the corresponding nested
   arrays of coordinate pairs. Also usable nested (`Array(Point)`, geo fields in
   a `Tuple`).
+- **Optional OO wrapper** (`packages/oo`, `jhondermarck/frankenphp-clickhouse-oo`):
+  a `ClickHouse` facade over the procedural API with `Cursor`/`Batch` handle
+  objects, a lazy `Cursor::rows()` generator, and a Prometheus/OpenMetrics
+  exporter (`ClickHouse::formatMetrics()`), demoed by
+  `examples/metrics_endpoint.php`.
+
+### Changed
+
+- **Faster reads**: scalar-only result rows are now built in batches per CGo
+  crossing (`ch_add_rows`) instead of one call per row, cutting Go↔C transition
+  overhead. Measured ~13% faster `query_array` and ~21% faster cursor on a
+  100k-row SELECT (×8.4→×9.4 and ×7.6→×9.5 vs smi2). Results with a composite
+  column (Array/Map/Tuple/Geo/JSON) are unchanged (one row per call).
+- **CI**: Go and PHP suites now run on both amd64 and arm64; the PHP suite is
+  matrixed over ClickHouse versions (pinned 26.5 is required, `latest` is a
+  non-blocking canary). `actions/checkout` bumped to v5.
+
+### Fixed
+
+- **Docker healthcheck**: the compose `frankenphp` service had no explicit
+  healthcheck and inherited one probing the disabled Caddy admin API, so
+  `docker compose --wait` never saw it healthy. It now probes an app `/healthz`
+  route.
+
+## [0.2.0] - 2026-07-11
+
+### Added
 
 - **`clickhouse_stats(): array`** — a process-wide observability snapshot for
   health checks and leak diagnosis in worker mode: `connected`, process
@@ -41,11 +62,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fully documented signatures for editor autocompletion and static analysis.
 - **ETL example** (`examples/etl_export.php`) — a bounded-memory streaming
   cursor → batch table copy.
-- **Optional OO wrapper** (`packages/oo`, `jhondermarck/frankenphp-clickhouse-oo`):
-  a `ClickHouse` facade over the procedural API with `Cursor`/`Batch` handle
-  objects, a lazy `Cursor::rows()` generator, and a Prometheus/OpenMetrics
-  exporter (`ClickHouse::formatMetrics()`), demoed by
-  `examples/metrics_endpoint.php`.
 - **Fuzz target** `FuzzParseColMeta` for the column-type parser, and
   `make test_resilience` verifying the connection pool redials transparently
   after a ClickHouse restart.
