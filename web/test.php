@@ -1747,6 +1747,103 @@ if ($ooDir === null) {
 }
 
 // =============================================================================
+// Property-based round-trip: random values per type → insert → read back via
+// query_array AND query_columns → assert equality. Seeded for reproducibility.
+// =============================================================================
+
+suite('Property-based round-trip');
+
+$seed = (int) (getenv('ROUNDTRIP_SEED') ?: 20260712);
+mt_srand($seed);
+// DateTime is deliberately excluded here: round-tripping a naive datetime
+// string through clickhouse_insert (client-side parse) depends on the server
+// timezone, so it's environment-fragile — the fixed DateTime tests (SQL insert)
+// cover formatting instead. This suite sticks to types with an exact round-trip.
+
+$rtN = 100;
+$uuidv4 = function (): string {
+    $b = '';
+    for ($i = 0; $i < 16; $i++) {
+        $b .= chr(mt_rand(0, 255));
+    }
+    $b[6] = chr((ord($b[6]) & 0x0f) | 0x40);
+    $b[8] = chr((ord($b[8]) & 0x3f) | 0x80);
+    $h = bin2hex($b);
+    return sprintf('%s-%s-%s-%s-%s', substr($h, 0, 8), substr($h, 8, 4), substr($h, 12, 4), substr($h, 16, 4), substr($h, 20, 12));
+};
+
+// Build expected rows with generators whose values round-trip exactly.
+$expected = [];
+for ($i = 0; $i < $rtN; $i++) {
+    $arrLen = mt_rand(0, 4); // includes empty arrays
+    $arr = [];
+    for ($j = 0; $j < $arrLen; $j++) {
+        $arr[] = mt_rand(-1000000, 1000000);
+    }
+    $expected[$i] = [
+        'n'   => $i,
+        'u8'  => mt_rand(0, 255),
+        'i32' => mt_rand(-2147483648, 2147483647),
+        'i64' => mt_rand(-2000000000, 2000000000) * 1000 + mt_rand(0, 999),
+        'f64' => (float) mt_rand(-1000000, 1000000),
+        's'   => 'str-' . mt_rand(0, 999999) . ['', ' café', "\ttab", ' 日本'][mt_rand(0, 3)],
+        'b'   => mt_rand(0, 1),
+        'id'  => $uuidv4(),
+        'opt' => mt_rand(0, 9) < 3 ? null : 'opt-' . mt_rand(0, 999999),
+        'arr' => $arr,
+    ];
+}
+
+$rtCols = ['n', 'u8', 'i32', 'i64', 'f64', 's', 'b', 'id', 'opt', 'arr'];
+$rtRows = [];
+foreach ($expected as $e) {
+    $rtRows[] = [$e['n'], $e['u8'], $e['i32'], $e['i64'], $e['f64'], $e['s'],
+        (bool) $e['b'], $e['id'], $e['opt'], $e['arr']];
+}
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_rt_test");
+clickhouse_exec("CREATE TABLE clickhousephp_rt_test (
+    n UInt32, u8 UInt8, i32 Int32, i64 Int64, f64 Float64, s String,
+    b Bool, id UUID, opt Nullable(String), arr Array(Int64)
+) ENGINE = Memory");
+$rtIns = clickhouse_insert('clickhousephp_rt_test', $rtRows, $rtCols);
+eq($rtIns, 'Ok', "insert $rtN random rows (seed $seed)");
+
+// Compare a read-back row set against expected; b is read as int (Bool → int).
+$compare = function (array $got, string $mode) use ($expected, $rtN, $seed): void {
+    $mismatch = null;
+    for ($i = 0; $i < $rtN; $i++) {
+        $exp = $expected[$i]; // b is already 0/1, matching Bool → int
+        foreach ($exp as $col => $want) {
+            if ($got[$i][$col] !== $want) {
+                $mismatch = "row $i col $col: got " . var_export($got[$i][$col], true) . " want " . var_export($want, true);
+                break 2;
+            }
+        }
+    }
+    ok($mismatch === null, "$mode round-trips all $rtN rows (seed $seed)", (string) $mismatch);
+};
+
+// query_array → list of assoc rows, ordered by n.
+$rtArray = clickhouse_query_array("SELECT * FROM clickhousephp_rt_test ORDER BY n");
+eq(count($rtArray), $rtN, "query_array returned $rtN rows");
+$compare($rtArray, 'query_array');
+
+// query_columns → transpose back to rows for the same comparison.
+$rtColumns = clickhouse_query_columns("SELECT * FROM clickhousephp_rt_test ORDER BY n");
+$asRows = [];
+for ($i = 0; $i < $rtN; $i++) {
+    $row = [];
+    foreach ($rtCols as $c) {
+        $row[$c] = $rtColumns[$c][$i];
+    }
+    $asRows[$i] = $row;
+}
+$compare($asRows, 'query_columns');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_rt_test");
+
+// =============================================================================
 // Cleanup
 // =============================================================================
 

@@ -202,6 +202,12 @@ func phpValueTyped(v any, t reflect.Type) any {
 		assoc = tv
 	}
 	if assoc != nil {
+		// An empty PHP array decodes to an empty map, but the target column may
+		// be an Array (slice): produce an empty slice, not a map, so an empty
+		// Array(T) cell inserts cleanly instead of failing in the driver.
+		if len(assoc) == 0 && t != nil && t.Kind() == reflect.Slice {
+			return reflect.MakeSlice(t, 0, 0).Interface()
+		}
 		if t != nil && t.Kind() == reflect.Map {
 			m := reflect.MakeMapWithSize(t, len(assoc))
 			kt, vt := t.Key(), t.Elem()

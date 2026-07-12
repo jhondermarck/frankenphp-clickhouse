@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Empty `Array` via `clickhouse_insert`**: an empty PHP array decodes to an
+  empty map, and the value builder returned a map even when the target column
+  was an `Array(T)` (slice), failing in the driver. It now yields an empty
+  slice, so empty array cells insert cleanly. Found by the new property tests.
+
+### Added
+
+- **Property-based round-trip tests**: seeded random values across many types
+  are inserted and read back through both `query_array` and `query_columns`,
+  asserting exact equality (reproducible via `ROUNDTRIP_SEED`).
+
 ## [0.4.0] - 2026-07-12
 
 ### Added

@@ -444,7 +444,7 @@ See [`examples/metrics_endpoint.php`](examples/metrics_endpoint.php).
 ## Testing
 
 ```bash
-make test             # PHP integration tests (382 assertions)
+make test             # PHP integration tests (387 assertions)
 make test_go          # Go unit tests (incl. a race-tested concurrency stress test)
 make test_resilience  # Restart ClickHouse, verify the pool transparently redials
 ```
@@ -463,6 +463,7 @@ The test suite covers:
 - **Exceptions**: RuntimeException on bad query, bad DSN, not connected, closed handles
 - **Observability**: `clickhouse_stats` shape, counter deltas, open-handle gauge
 - **OO wrapper**: facade query/cursor/batch, `rows()` generator, Prometheus `formatMetrics`
+- **Property-based round-trip**: seeded random values per type inserted then read back via both query_array and query_columns, asserting exact equality
 - **Memory leaks**: repeated query/insert/exec with no growth
 
 ## Install
