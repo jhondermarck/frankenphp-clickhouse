@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -319,6 +320,7 @@ func appendRows(batch driver.Batch, rows [][]any, stride int) error {
 func clickhouse_insert(table *C.zend_string, values *C.zval, columns *C.zval, options *C.zval) (ret unsafe.Pointer) {
 	defer phpPanicGuard(&ret)
 	atomic.AddInt64(&statInserts, 1)
+	defer func(t0 time.Time) { recordQueryDuration(time.Since(t0)) }(time.Now())
 	client, ctx, cancel, err := callSetup(options, true)
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
@@ -407,6 +409,7 @@ func buildQueryArgs(params *C.zval) ([]any, error) {
 func clickhouse_exec(query *C.zend_string, params *C.zval, options *C.zval) (ret unsafe.Pointer) {
 	defer phpPanicGuard(&ret)
 	atomic.AddInt64(&statExecs, 1)
+	defer func(t0 time.Time) { recordQueryDuration(time.Since(t0)) }(time.Now())
 	client, ctx, cancel, err := callSetup(options, true)
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)
@@ -428,6 +431,7 @@ func clickhouse_exec(query *C.zend_string, params *C.zval, options *C.zval) (ret
 func clickhouse_query_array(query *C.zend_string, params *C.zval, options *C.zval) (ret unsafe.Pointer) {
 	defer nullPanicGuard(&ret)
 	atomic.AddInt64(&statQueries, 1)
+	defer func(t0 time.Time) { recordQueryDuration(time.Since(t0)) }(time.Now())
 	client, ctx, cancel, err := callSetup(options, true)
 	if err != nil {
 		setLastError(err.Error())
@@ -471,6 +475,7 @@ func clickhouse_query_array(query *C.zend_string, params *C.zval, options *C.zva
 func clickhouse_query_columns(query *C.zend_string, params *C.zval, options *C.zval) (ret unsafe.Pointer) {
 	defer nullPanicGuard(&ret)
 	atomic.AddInt64(&statQueries, 1)
+	defer func(t0 time.Time) { recordQueryDuration(time.Since(t0)) }(time.Now())
 	client, ctx, cancel, err := callSetup(options, true)
 	if err != nil {
 		setLastError(err.Error())
@@ -514,6 +519,7 @@ func clickhouse_query_columns(query *C.zend_string, params *C.zval, options *C.z
 func clickhouse_async_insert(query *C.zend_string, wait C.int, params *C.zval, options *C.zval) (ret unsafe.Pointer) {
 	defer phpPanicGuard(&ret)
 	atomic.AddInt64(&statAsyncInserts, 1)
+	defer func(t0 time.Time) { recordQueryDuration(time.Since(t0)) }(time.Now())
 	client, ctx, cancel, err := callSetup(options, true)
 	if err != nil {
 		return frankenphp.PHPString("ERROR: "+err.Error(), false)

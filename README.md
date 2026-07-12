@@ -423,6 +423,9 @@ $s = clickhouse_stats();
 //     'queries' => 42, 'inserts' => 7, 'execs' => 3, 'async_inserts' => 0,
 //     'cursors_opened' => 5, 'batches_opened' => 2, 'errors' => 1,
 //   ],
+//   'timing' => [                      // aggregate query latency (µs)
+//     'operations' => 52, 'total_us' => 1_800_000, 'max_us' => 210_000,
+//   ],                                 // avg = total_us / operations
 // ]
 
 if ($s['handles']['cursors_open'] > 100) {
@@ -444,7 +447,7 @@ See [`examples/metrics_endpoint.php`](examples/metrics_endpoint.php).
 ## Testing
 
 ```bash
-make test             # PHP integration tests (387 assertions)
+make test             # PHP integration tests (388 assertions)
 make test_go          # Go unit tests (incl. a race-tested concurrency stress test)
 make test_resilience  # Restart ClickHouse, verify the pool transparently redials
 ```

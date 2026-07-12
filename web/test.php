@@ -1672,6 +1672,8 @@ ok(is_array($st), 'stats returns a PHP array');
 eq($st['connected'], 1, 'connected = 1 while connected');
 ok(is_array($st['handles']) && is_array($st['pool']) && is_array($st['counters']),
     'stats has handles / pool / counters sections');
+ok(is_array($st['timing'] ?? null) && $st['timing']['operations'] > 0 && $st['timing']['max_us'] >= 0,
+    'stats.timing tracks operations and max latency');
 ok(is_string($st['server_version']) && $st['server_version'] !== '', 'server_version is a non-empty string');
 ok(is_int($st['uptime_seconds']) && $st['uptime_seconds'] >= 0, 'uptime_seconds is a non-negative int');
 eq($st['handles']['idle_ttl_seconds'], 600, 'handles.idle_ttl_seconds = 600 (10 min)');

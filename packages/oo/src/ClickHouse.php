@@ -135,6 +135,13 @@ final class ClickHouse
             $counter($key, (int) $value);
         }
 
+        $timing = (array) ($stats['timing'] ?? []);
+        if (isset($timing['operations'])) {
+            $counter('query_operations', (int) $timing['operations']);
+            $counter('query_duration_us', (int) ($timing['total_us'] ?? 0));
+            $gauge('query_duration_us_max', (int) ($timing['max_us'] ?? 0));
+        }
+
         $version = (string) ($stats['server_version'] ?? '');
         if ($version !== '') {
             $version = str_replace(['\\', '"'], ['\\\\', '\\"'], $version);

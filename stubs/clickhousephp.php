@@ -224,7 +224,8 @@ function clickhouse_server_version(?int $connection = null): string {}
  *   named_connections:int,
  *   handles:array{cursors_open:int,batches_open:int,idle_ttl_seconds:int,last_reap_unix:int,last_reap_count:int},
  *   pool:array{open?:int,idle?:int,max_open_conns?:int,max_idle_conns?:int},
- *   counters:array{queries:int,inserts:int,execs:int,async_inserts:int,cursors_opened:int,batches_opened:int,errors:int}
+ *   counters:array{queries:int,inserts:int,execs:int,async_inserts:int,cursors_opened:int,batches_opened:int,errors:int},
+ *   timing:array{operations:int,total_us:int,max_us:int}
  * }
  */
 function clickhouse_stats(): array {}

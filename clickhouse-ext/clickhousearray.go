@@ -1481,6 +1481,15 @@ func clickhouse_stats() (ret unsafe.Pointer) {
 	kvAddLong(c, phpKey{s: "errors"}, atomic.LoadInt64(&statErrors))
 	kvAddArr(root, phpKey{s: "counters"}, c)
 
+	// Aggregate query latency (µs) — operations timed, summed, and worst-case.
+	// avg = total_us / operations. Cheap lock-free accounting; no per-query
+	// push callback (calling PHP from the extension is fragile in worker mode).
+	tm := C.ch_new_array(3)
+	kvAddLong(tm, phpKey{s: "operations"}, atomic.LoadInt64(&statTimedOps))
+	kvAddLong(tm, phpKey{s: "total_us"}, atomic.LoadInt64(&statQueryDurationUs))
+	kvAddLong(tm, phpKey{s: "max_us"}, atomic.LoadInt64(&statQueryMaxUs))
+	kvAddArr(root, phpKey{s: "timing"}, tm)
+
 	return unsafe.Pointer(root)
 }
 

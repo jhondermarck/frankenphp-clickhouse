@@ -3,6 +3,7 @@ package clickhousephp
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -30,6 +31,10 @@ var (
 	statLastReapUnix  int64 // unix time of the reaper's most recent sweep
 	statLastReapCount int64 // handles reaped in that sweep
 
+	statTimedOps        int64 // operations whose latency was recorded
+	statQueryDurationUs int64 // summed operation latency (microseconds)
+	statQueryMaxUs      int64 // slowest single operation (microseconds)
+
 	processStart = time.Now()
 
 	serverVerMu sync.Mutex
@@ -47,6 +52,21 @@ func cacheServerVersion(conn clickhouse.Conn) {
 		serverVerMu.Lock()
 		serverVer = fmt.Sprintf("%d.%d.%d", v.Version.Major, v.Version.Minor, v.Version.Patch)
 		serverVerMu.Unlock()
+	}
+}
+
+// recordQueryDuration accumulates one operation's wall-clock latency into the
+// process-wide timing aggregates (lock-free). Reported by clickhouse_stats so
+// a worker can expose average and worst-case query latency.
+func recordQueryDuration(d time.Duration) {
+	us := d.Microseconds()
+	atomic.AddInt64(&statTimedOps, 1)
+	atomic.AddInt64(&statQueryDurationUs, us)
+	for {
+		cur := atomic.LoadInt64(&statQueryMaxUs)
+		if us <= cur || atomic.CompareAndSwapInt64(&statQueryMaxUs, cur, us) {
+			break
+		}
 	}
 }
 

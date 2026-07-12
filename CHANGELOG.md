@@ -15,6 +15,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Query latency in `clickhouse_stats`**: a new `timing` section
+  (`operations`, `total_us`, `max_us`) tracks aggregate and worst-case query
+  latency process-wide via lock-free counters — average = `total_us /
+  operations`. Also surfaced by the OO package's Prometheus exporter. (A
+  per-query *push* callback was considered but not added: invoking a PHP
+  callable from the extension is fragile in worker mode; this pull-based
+  aggregate is safe and covers the APM signal.)
 - **Property-based round-trip tests**: seeded random values across many types
   are inserted and read back through both `query_array` and `query_columns`,
   asserting exact equality (reproducible via `ROUNDTRIP_SEED`).
