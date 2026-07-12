@@ -178,6 +178,23 @@ func TestParseColMetaGeo(t *testing.T) {
 	}
 }
 
+func TestParseColMetaDynamic(t *testing.T) {
+	for _, name := range []string{"Dynamic", "Dynamic(max_types=10)", "Variant(UInt64, String)", "Variant(Bool, Int64, String)"} {
+		m, err := parseColMeta(name)
+		if err != nil {
+			t.Fatalf("parseColMeta(%q) error: %v", name, err)
+		}
+		if m.kind != kindDynamic {
+			t.Errorf("parseColMeta(%q) kind = %d, want kindDynamic", name, m.kind)
+		}
+	}
+	// Nested inside a composite.
+	m, err := parseColMeta("Array(Variant(UInt64, String))")
+	if err != nil || m.kind != kindArray || m.inner == nil || m.inner.kind != kindDynamic {
+		t.Errorf("Array(Variant(...)) parsed incorrectly: %+v (err %v)", m, err)
+	}
+}
+
 func TestSplitTupleField(t *testing.T) {
 	cases := []struct{ in, name, typ string }{
 		{"UInt8", "", "UInt8"},
@@ -269,6 +286,7 @@ func FuzzParseColMeta(f *testing.F) {
 		"Tuple(", "Map(", "Array(", "Tuple(,)", "`weird name` UInt8",
 		"Nullable(", "LowCardinality()", "Map(,)", "Tuple())(",
 		"Point", "Ring", "Polygon", "MultiPolygon", "Array(Point)", "Map(String, Point)",
+		"Dynamic", "Dynamic(max_types=5)", "Variant(UInt64, String)", "Array(Variant(Int64, String))",
 	}
 	for _, s := range seeds {
 		f.Add(s)

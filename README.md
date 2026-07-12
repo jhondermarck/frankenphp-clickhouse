@@ -304,8 +304,10 @@ clickhouse_disconnect();
 | `Ring`, `LineString` | `array` | List of points: `[[x, y], …]` |
 | `Polygon`, `MultiLineString` | `array` | List of rings/lines: `[[[x, y], …], …]` |
 | `MultiPolygon` | `array` | List of polygons: `[[[[x, y], …], …], …]` |
+| `Variant(…)` | mixed | The concrete value of whichever branch a row holds (or `null`) |
+| `Dynamic` | mixed | The concrete value, whatever its runtime type — scalar or nested array |
 
-Types not listed above (Dynamic, Variant…) are not yet supported and will throw a `RuntimeException`.
+Types not listed above (`AggregateFunction`/`SimpleAggregateFunction` states, `Interval*`, `Nothing`) are not yet supported and will throw a `RuntimeException`.
 
 Tuple values also round-trip on write: pass a nested PHP list for an unnamed
 `Tuple(…)`, or an associative array (keyed by field name) for a named one.
@@ -424,7 +426,7 @@ See [`examples/metrics_endpoint.php`](examples/metrics_endpoint.php).
 ## Testing
 
 ```bash
-make test             # PHP integration tests (360 assertions)
+make test             # PHP integration tests (369 assertions)
 make test_go          # Go unit tests (incl. a race-tested concurrency stress test)
 make test_resilience  # Restart ClickHouse, verify the pool transparently redials
 ```
@@ -438,7 +440,7 @@ go test -C clickhouse-ext -run=xxx -fuzz=FuzzParseColMeta -fuzztime=30s .
 The test suite covers:
 - **SELECT / cursor**: query_array and streaming cursors return correct PHP arrays for every supported type
 - **INSERT / batch / async**: all write paths with value verification, including Map/Array/Tuple (and nullable) columns
-- **Types**: numeric, String/FixedString/Enum, Date*/DateTime*, UUID, IPv4/6, Decimal, Bool, Nullable, LowCardinality, Array, Map, Tuple (named/unnamed/nested, incl. `Array(Tuple)` and `Map(_, Tuple)`), Geo (Point/Ring/LineString/Polygon/Multi*), Int128/256, JSON
+- **Types**: numeric, String/FixedString/Enum, Date*/DateTime*, UUID, IPv4/6, Decimal, Bool, Nullable, LowCardinality, Array, Map, Tuple (named/unnamed/nested, incl. `Array(Tuple)` and `Map(_, Tuple)`), Geo (Point/Ring/LineString/Polygon/Multi*), Variant/Dynamic, Int128/256, JSON
 - **Options**: per-call settings / query_id / timeout, multiple connections, ClickHouse error codes via `getCode()`
 - **Exceptions**: RuntimeException on bad query, bad DSN, not connected, closed handles
 - **Observability**: `clickhouse_stats` shape, counter deltas, open-handle gauge

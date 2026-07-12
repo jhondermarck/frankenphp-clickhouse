@@ -491,6 +491,125 @@ func packCol(
 		arr := buildGeo(reflect.ValueOf(dest).Elem())
 		uvals[i] = C.uint64_t(uintptr(arr))
 		types[i] = chArray
+	case kindDynamic:
+		// Variant(...) / Dynamic scan into chcol.Variant; resolve the concrete
+		// value and pack it dynamically into this column's slot.
+		var v any
+		if d, ok := dest.(*chcol.Variant); ok {
+			if d.Nil() {
+				types[i] = chNull
+				return
+			}
+			v = d.Any()
+		} else {
+			v = reflect.ValueOf(dest).Elem().Interface()
+		}
+		packAnyValue(i, v, types, soff, slen, ivals, uvals, fvals, sbuf)
+	}
+}
+
+// packAnyValue writes a dynamically-typed value (from a Variant/Dynamic column)
+// into column slot i: scalars go to the typed arrays like packCol, composites
+// build a nested zend_array (reusing the JSON walker for their contents).
+// Mirrors addAnyKV, but targets a column slot rather than a keyed insert.
+func packAnyValue(
+	i int, v any,
+	types []C.uint8_t, soff []C.uint32_t, slen []C.uint32_t,
+	ivals []C.int64_t, uvals []C.uint64_t, fvals []C.double, sbuf *[]byte,
+) {
+	if vt, ok := v.(chcol.Variant); ok {
+		if vt.Nil() {
+			types[i] = chNull
+			return
+		}
+		v = vt.Any()
+	}
+	off := C.uint32_t(len(*sbuf))
+	appendStr := func(s string) {
+		*sbuf = append(*sbuf, s...)
+		soff[i], slen[i], types[i] = off, C.uint32_t(len(s)), chStr
+	}
+	switch t := v.(type) {
+	case nil:
+		types[i] = chNull
+	case string:
+		appendStr(t)
+	case bool:
+		if t {
+			uvals[i] = 1
+		} else {
+			uvals[i] = 0
+		}
+		types[i] = chUInt
+	case int:
+		ivals[i], types[i] = C.int64_t(t), chInt
+	case int8:
+		ivals[i], types[i] = C.int64_t(t), chInt
+	case int16:
+		ivals[i], types[i] = C.int64_t(t), chInt
+	case int32:
+		ivals[i], types[i] = C.int64_t(t), chInt
+	case int64:
+		ivals[i], types[i] = C.int64_t(t), chInt
+	case uint:
+		uvals[i], types[i] = C.uint64_t(t), chUInt
+	case uint8:
+		uvals[i], types[i] = C.uint64_t(t), chUInt
+	case uint16:
+		uvals[i], types[i] = C.uint64_t(t), chUInt
+	case uint32:
+		uvals[i], types[i] = C.uint64_t(t), chUInt
+	case uint64:
+		uvals[i], types[i] = C.uint64_t(t), chUInt
+	case float32:
+		fvals[i], types[i] = C.double(t), chFloat
+	case float64:
+		fvals[i], types[i] = C.double(t), chFloat
+	case time.Time:
+		appendStr(string(appendClickHouseDateTime64(nil, t)))
+	case *big.Int:
+		appendStr(t.String())
+	case decimal.Decimal:
+		appendStr(t.String())
+	case uuid.UUID:
+		appendStr(t.String())
+	case netip.Addr:
+		appendStr(t.String())
+	case map[string]any:
+		uvals[i], types[i] = C.uint64_t(uintptr(buildAnyMap(t, 0))), chArray
+	case chcol.JSON:
+		uvals[i], types[i] = C.uint64_t(uintptr(buildAnyMap(t.NestedMap(), 0))), chArray
+	case *chcol.JSON:
+		if t == nil {
+			types[i] = chNull
+			return
+		}
+		uvals[i], types[i] = C.uint64_t(uintptr(buildAnyMap(t.NestedMap(), 0))), chArray
+	default:
+		rv := reflect.ValueOf(v)
+		switch rv.Kind() {
+		case reflect.Pointer:
+			if rv.IsNil() {
+				types[i] = chNull
+				return
+			}
+			packAnyValue(i, rv.Elem().Interface(), types, soff, slen, ivals, uvals, fvals, sbuf)
+		case reflect.Slice, reflect.Array:
+			sub := C.ch_new_array(C.uint32_t(rv.Len()))
+			for j := 0; j < rv.Len(); j++ {
+				addAnyKV(sub, phpKey{isInt: true, i: int64(j)}, rv.Index(j).Interface(), 1)
+			}
+			uvals[i], types[i] = C.uint64_t(uintptr(unsafe.Pointer(sub))), chArray
+		case reflect.Map:
+			sub := C.ch_new_array(C.uint32_t(rv.Len()))
+			iter := rv.MapRange()
+			for iter.Next() {
+				addAnyKV(sub, phpKey{s: fmt.Sprintf("%v", iter.Key().Interface())}, iter.Value().Interface(), 1)
+			}
+			uvals[i], types[i] = C.uint64_t(uintptr(unsafe.Pointer(sub))), chArray
+		default:
+			appendStr(fmt.Sprintf("%v", v))
+		}
 	}
 }
 
@@ -531,8 +650,8 @@ func buildPHPArray(dest interface{}, inner *colMeta) unsafe.Pointer {
 	if inner == nil {
 		return unsafe.Pointer(C.ch_new_array(0))
 	}
-	// Nested arrays, maps, tuples and geo have no typed fast path — go generic.
-	if inner.kind == kindArray || inner.kind == kindMap || inner.kind == kindTuple || inner.kind == kindGeo {
+	// Nested arrays, maps, tuples, geo and dynamic have no typed fast path.
+	if inner.kind == kindArray || inner.kind == kindMap || inner.kind == kindTuple || inner.kind == kindGeo || inner.kind == kindDynamic {
 		return buildReflectArray(reflect.ValueOf(dest).Elem(), inner)
 	}
 	if inner.nullable {
@@ -1037,6 +1156,10 @@ func buildReflectArray(v reflect.Value, elem *colMeta) unsafe.Pointer {
 			C.ch_arr_add_arr(arr, (*C.zend_array)(buildTuple(e, elem)))
 		case kindGeo:
 			C.ch_arr_add_arr(arr, (*C.zend_array)(buildGeo(e)))
+		case kindDynamic:
+			// Element is a chcol.Variant — resolve dynamically (sequential int
+			// keys keep the array packed, same as ch_arr_add_*).
+			addAnyKV(arr, phpKey{isInt: true, i: int64(j)}, e.Interface(), 1)
 		case kindString:
 			arrAddStr(arr, e.String())
 		case kindInt8, kindInt16, kindInt32, kindInt64:
@@ -1105,6 +1228,8 @@ func buildReflectMap(v reflect.Value, m *colMeta) unsafe.Pointer {
 			kvAddArr(arr, k, (*C.zend_array)(buildTuple(e, val)))
 		case kindGeo:
 			kvAddArr(arr, k, (*C.zend_array)(buildGeo(e)))
+		case kindDynamic:
+			addAnyKV(arr, k, e.Interface(), 1)
 		case kindString:
 			kvAddStr(arr, k, e.String())
 		case kindInt8, kindInt16, kindInt32, kindInt64:
@@ -1194,8 +1319,9 @@ func addTupleField(arr *C.zend_array, k phpKey, e reflect.Value, m *colMeta) {
 		kvAddArr(arr, k, (*C.zend_array)(buildTuple(e, m)))
 	case kindGeo:
 		kvAddArr(arr, k, (*C.zend_array)(buildGeo(e)))
-	case kindJSON:
-		// JSON inside a tuple surfaces as chcol.JSON — reuse the dynamic walker.
+	case kindJSON, kindDynamic:
+		// JSON / Variant / Dynamic inside a tuple surface as chcol values —
+		// reuse the dynamic walker.
 		addAnyKV(arr, k, e.Interface(), 0)
 	case kindString:
 		kvAddStr(arr, k, e.String())

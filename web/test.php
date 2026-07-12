@@ -466,6 +466,46 @@ eq($r['named']['loc'], [100.0, 200.0], 'Tuple Point field = [100,200]');
 clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_geo_test");
 
 // =============================================================================
+// Variant and Dynamic types (each row resolves to its concrete value)
+// =============================================================================
+
+suite('Variant and Dynamic types');
+
+$vdOpt = ['settings' => [
+    'allow_experimental_variant_type' => 1,
+    'allow_experimental_dynamic_type' => 1,
+    'allow_suspicious_variant_types'  => 1,
+]];
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_vd_test", null, $vdOpt);
+clickhouse_exec("CREATE TABLE clickhousephp_vd_test (
+    id UInt8,
+    v  Variant(UInt64, String),
+    d  Dynamic
+) ENGINE = Memory", null, $vdOpt);
+clickhouse_exec("INSERT INTO clickhousephp_vd_test VALUES
+    (1, 42, 'hello'),
+    (2, 'text', 3.14),
+    (3, NULL, [1, 2, 3])", null, $vdOpt);
+
+$rows = clickhouse_query_array("SELECT * FROM clickhousephp_vd_test ORDER BY id", null, $vdOpt);
+eq(count($rows), 3, 'variant/dynamic row count = 3');
+
+// Variant resolves to the concrete scalar of whichever branch a row holds
+eq($rows[0]['v'], 42, 'Variant UInt64 branch → int 42');
+ok(is_int($rows[0]['v']), 'Variant int branch is PHP int');
+eq($rows[1]['v'], 'text', 'Variant String branch → string');
+ok($rows[2]['v'] === null, 'Variant NULL → null');
+
+// Dynamic can hold a different type in every row, including a composite
+eq($rows[0]['d'], 'hello', 'Dynamic holds a string');
+ok(abs($rows[1]['d'] - 3.14) < 0.001, 'Dynamic holds a float');
+ok(is_float($rows[1]['d']), 'Dynamic float is PHP float');
+eq($rows[2]['d'], [1, 2, 3], 'Dynamic holds an array → PHP array');
+
+clickhouse_exec("DROP TABLE IF EXISTS clickhousephp_vd_test", null, $vdOpt);
+
+// =============================================================================
 // clickhouse_exec — DDL et commandes
 // =============================================================================
 

@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`Variant(…)` and `Dynamic` types** (read): each row resolves to the
+  concrete value of whichever type it holds — a PHP scalar, `null`, or a nested
+  array for composite values. Also usable nested (`Array(Variant)`,
+  `Map(_, Dynamic)`, Variant/Dynamic fields in a `Tuple`).
+
 ## [0.3.0] - 2026-07-12
 
 ### Added

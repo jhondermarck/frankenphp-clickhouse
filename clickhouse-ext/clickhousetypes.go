@@ -38,6 +38,7 @@ const (
 	kindMap
 	kindTuple
 	kindGeo
+	kindDynamic
 )
 
 type colMeta struct {
@@ -182,6 +183,12 @@ strip:
 			fields = append(fields, tupleField{name: name, meta: fm})
 		}
 		return colMeta{kind: kindTuple, nullable: nullable, named: named, fields: fields}, nil
+	}
+	if strings.HasPrefix(raw, "Variant(") || raw == "Dynamic" || strings.HasPrefix(raw, "Dynamic(") {
+		// Variant(...) and Dynamic both scan into chcol.Variant (Dynamic is an
+		// alias). The concrete value is resolved at read time and packed
+		// dynamically — no inner meta needed.
+		return colMeta{kind: kindDynamic, nullable: nullable}, nil
 	}
 	if strings.HasPrefix(raw, "DateTime64") {
 		return colMeta{kind: kindDateTime64, nullable: nullable}, nil
