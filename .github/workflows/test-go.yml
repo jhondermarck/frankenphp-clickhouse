@@ -33,3 +33,24 @@ jobs:
               CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" \
               go test -C clickhouse-ext -v -count=1 .
             '
+
+  # Continuously fuzz the column-type parser (it has already caught two real
+  # out-of-bounds panics). Runs the saved crashers as seeds, then explores.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Fuzz parseColMeta
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/work" \
+            -w /work \
+            dunglas/frankenphp:builder \
+            sh -c '
+              CGO_ENABLED=1 \
+              CGO_CFLAGS="$(php-config --includes) -D_GNU_SOURCE" \
+              CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" \
+              go test -C clickhouse-ext -run=xxx -fuzz=FuzzParseColMeta -fuzztime=60s .
+            '
+
