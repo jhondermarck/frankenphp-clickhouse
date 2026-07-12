@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-12
+
 ### Added
 
 - **`clickhouse_query_columns(): array`** — a columnar result mode returning
